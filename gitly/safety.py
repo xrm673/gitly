@@ -39,6 +39,8 @@ def _has(args: list[str], *flags: str) -> bool:
     return False
 
 
+
+
 def blocked_reason(args: list[str]) -> str | None:
     if not args:
         return "empty command"
