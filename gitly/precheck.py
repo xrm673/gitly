@@ -3,6 +3,7 @@
 - secret files (.env, private keys, credentials) and API keys pasted into code
 - generated folders and OS clutter (node_modules/, .venv/, .DS_Store, ...)
 - files too big for GitHub
+- conflict markers still in a file when finishing a merge (`leftover_markers`)
 
 Everything here is local pattern matching (no AI), so it is instant and works
 without an API key. The fix is a normal Plan the user reviews: add the
@@ -164,6 +165,29 @@ def check(s: RepoState) -> list[Finding]:
             "your saves) and read it from there. If it was ever uploaded, replace the key.",
             None))
     return findings
+
+
+# How git opens and closes a conflict. "=======" alone isn't counted: it is also
+# a normal heading underline in Markdown and reStructuredText.
+_MARKER = re.compile(rb"(?:<{7}|>{7})(?:\s|$)")
+
+
+def leftover_markers(s: RepoState) -> list[tuple[str, int]]:
+    """(path, line number) of the first conflict marker in each unsaved file."""
+    found: list[tuple[str, int]] = []
+    for path in sorted(git.unsaved_paths(s)):
+        try:
+            with open(Path(s.root) / path, "rb") as f:
+                if b"\0" in f.read(8000):
+                    continue  # binary
+                f.seek(0)
+                for n, line in enumerate(f, 1):
+                    if _MARKER.match(line):
+                        found.append((path, n))
+                        break
+        except OSError:
+            continue  # deleted, or a folder
+    return found
 
 
 def without(s: RepoState, findings: list[Finding]) -> RepoState:

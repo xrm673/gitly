@@ -1307,8 +1307,33 @@ class Gitly(App):
             self.busy = False
             self.refresh_state()  # back on the menu, the cursor moves to the new next step
 
+    async def _markers_ok(self, plan: Plan) -> bool:
+        """Before a plan finishes a merge: stop if conflict markers are still in the files."""
+        if not any(st.args[:1] == ["commit"] or "--continue" in st.args for st in plan.steps):
+            return True
+        s = await asyncio.to_thread(git.state, self.cwd)
+        if s is None or not (s.conflicts or s.merging or s.rebasing or s.reverting):
+            return True
+        found = await asyncio.to_thread(precheck.leftover_markers, s)
+        if not found:
+            return True
+        n = len(found)
+        shown = "\n".join(f"  [b]{escape(p)}[/]  [dim]line {line}[/]" for p, line in found[:8])
+        more = f"\n  [dim]…and {n - 8} more[/]" if n > 8 else ""
+        choice = await self.push_screen_wait(ChooseScreen(
+            f"Conflict markers are still in {n} file{'s' if n != 1 else ''}",
+            [("back", "Go back and fix them  [dim](recommended)[/]"),
+             ("anyway", "Finish anyway")],
+            hint=f"{shown}{more}\n\nThese files still have <<<<<<< or >>>>>>> lines. Finishing now "
+                 "would save them as they are, and the code probably won't run. Open each file, "
+                 "keep the version you want, and delete the marker lines."))
+        self.log_.event("conflict_markers", files=n, choice=choice or "back")
+        return choice == "anyway"
+
     async def _execute(self, plan: Plan) -> None:
         log = self.log_
+        if not await self._markers_ok(plan):
+            return
         log.event("plan_shown", title=plan.title, source=plan.source, risk=plan.risk,
                   commands=[st.args for st in plan.steps], blocked=[r for _, r in plan.blocked])
         ok = await self.push_screen_wait(PlanScreen(plan))

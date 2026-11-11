@@ -841,3 +841,39 @@ async def test_ai_waits_for_files_to_settle(repo, monkeypatch):
         await app.workers.wait_for_complete()
         await pilot.pause()
         assert calls == ["save"] and "“x”" in text_of(app, "#next-title")
+
+
+def _conflicted_merge(repo):
+    _login_branch(repo, "a.txt", "login version\n")
+    (repo / "a.txt").write_text("main version\n"); sh(repo, "commit", "-qam", "main edit")
+    assert not git.run(["merge", "login"], repo).ok
+
+
+async def test_finish_merge_stops_on_leftover_markers(repo):
+    from gitly.app import ChooseScreen
+
+    _conflicted_merge(repo)
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await choose(pilot, "finish_merge")
+        warn = await wait_for(pilot, ChooseScreen)
+        assert "Conflict markers" in warn.title_text and "a.txt" in warn.hint
+        await pilot.press("enter")  # "Go back and fix them" is first
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app.screen is app.screen_stack[0]
+    assert git.state(repo).merging and "<<<<<<<" in (repo / "a.txt").read_text()
+
+
+async def test_finish_merge_after_fixing_markers(repo):
+    _conflicted_merge(repo)
+    (repo / "a.txt").write_text("both versions\n")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await choose(pilot, "finish_merge")
+        await wait_for(pilot, PlanScreen)
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+    assert not git.state(repo).merging
+    assert sh(repo, "log", "-1", "--format=%P").count(" ") == 1

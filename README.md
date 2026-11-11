@@ -127,7 +127,9 @@ before anything runs. If you have unsaved changes, gitly checks whether they
 are in the way (the other branch, the incoming work, or the undo changes the
 same file). If they are, it offers to save them first, with the usual pre-save
 check and AI description. If a merge or undo stops on conflicts, the main
-screen offers to finish or cancel it.
+screen offers to finish or cancel it. Before finishing, gitly checks the files
+for leftover `<<<<<<<` / `>>>>>>>` conflict markers and warns you if any are
+still there.
 
 **Pre-save check.** Before **Save my work**, gitly looks at what the save would
 include and warns about:
