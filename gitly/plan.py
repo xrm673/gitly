@@ -45,6 +45,7 @@ class Plan:
     summary: str = ""
     source: str = "menu"  # menu | rescue | ai
     note: str = ""  # extra text shown above the steps (e.g. AI's answer)
+    preview: tuple[str, str] | None = None  # (now, after) branch map markup
 
     @property
     def risk(self) -> str:

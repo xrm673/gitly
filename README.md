@@ -65,15 +65,19 @@ simple picture: one row per branch, left = older, right = newer, starting from
 the save it grew out of. It shows where you are, your unsaved changes, which
 saves are only on GitHub (hollow dots) or not uploaded yet, and branches that
 were already combined into main. It's a simplified view, not a full commit
-graph: each branch shows its last few saves of its own. For now the map is
-read-only; acting on branches directly from the map is next. See
-`gitly/graph.py`.
+graph: each branch shows its last few saves of its own. See `gitly/graph.py`.
 
-```
-  main          ●──●──●─────●──◆      ↑4 not uploaded
-▶ payments            │     ╰──●──◉   you are here · ✎ 2 unsaved files
-  old-idea            ╰──●            not on GitHub yet
-```
+You can act on the map directly. Arrow keys pick a save; the line below the
+map says what it is and which keys apply.
+
+- `n` starts a new branch from the selected save.
+- `Enter` switches to the selected branch.
+
+Every map action shows a **Now / After** picture next to the exact commands
+before anything runs. If you have unsaved changes, gitly checks whether they
+can come along (git carries them unless the other branch has a different
+version of the same file). If they're in the way, it offers to save them first,
+with the usual pre-save check and AI description.
 
 **Pre-save check.** Before **Save my work**, gitly looks at what the save would
 include and warns about:

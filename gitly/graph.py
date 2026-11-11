@@ -5,13 +5,17 @@ own recent commits, starting from the commit it grew out of. The main branch
 (the "trunk") is the top row. Commits that exist only on GitHub are drawn
 hollow, and unsaved changes hang off "you are here".
 
-build() reads the repo; render() turns the result into Rich markup. Every
-cell keeps its commit sha so the map can become interactive later.
+build() reads the repo; render() turns the result into Rich markup;
+positions() lists the cells a cursor can land on. after_*() return a copy of
+the graph as it will look after an action, for the before/after preview.
 """
 
 from __future__ import annotations
 
+import copy
 import heapq
+import time
+import zlib
 from dataclasses import dataclass, field
 
 from rich.markup import escape
@@ -50,6 +54,12 @@ class Lane:
     ahead: int = 0
     behind: int = 0
     merged: bool = False  # no commits of its own because they're already in the trunk
+    tip: str | None = None  # the commit the branch points at
+    badge: str = ""  # extra label in previews, e.g. "new branch"
+
+    @property
+    def is_branch(self) -> bool:
+        return self.kind in ("trunk", "branch")
 
 
 @dataclass
@@ -174,14 +184,14 @@ def build(s: RepoState) -> Graph:
     if trunk in by_name:
         t = by_name[trunk]
         lane = add(Lane(trunk, "trunk", current=s.branch == trunk, upstream=t["upstream"] or None,
-                        ahead=t["ahead"], behind=t["behind"]), [trunk], TRUNK_COMMITS)
+                        ahead=t["ahead"], behind=t["behind"], tip=t["sha"]), [trunk], TRUNK_COMMITS)
         lane.fork = None  # the trunk doesn't grow out of anything
         add_remote(lane, t)
 
     for b in claim_order:
         revs = [b["name"]] + ([f"^{trunk}"] if trunk in by_name else [])
         lane = Lane(b["name"], "branch", current=b["name"] == s.branch,
-                    upstream=b["upstream"] or None, ahead=b["ahead"], behind=b["behind"])
+                    upstream=b["upstream"] or None, ahead=b["ahead"], behind=b["behind"], tip=b["sha"])
         if b["sha"] in claimed:
             lane.fork = b["sha"]  # points at a commit on another lane, nothing of its own
             lanes.append(lane)
@@ -194,7 +204,7 @@ def build(s: RepoState) -> Graph:
 
     if s.detached and s.head_sha not in claimed:
         revs = ["HEAD"] + ([f"^{trunk}"] if trunk in by_name else [])
-        add(Lane("(no branch)", "detached", current=True), revs, PER_LANE)
+        add(Lane("(no branch)", "detached", current=True, tip=s.head_sha), revs, PER_LANE)
 
     # Show: trunk, then the current branch, then the rest; GitHub rows under their branch.
     rank = {b["name"]: i for i, b in enumerate(shown)}
@@ -242,6 +252,80 @@ def columns(g: Graph) -> dict[str, int]:
     return col
 
 
+def positions(g: Graph) -> list[list[tuple[int, str]]]:
+    """Per lane, the (column, sha) cells a cursor can land on, left to right.
+
+    A branch with no commits of its own gets one cell: where it starts.
+    """
+    col = columns(g)
+    out = []
+    for lane in g.lanes:
+        cells = [(col[c.sha], c.sha) for c in lane.commits]
+        if not cells and lane.fork in col:
+            cells = [(col[lane.fork], lane.fork)]
+        out.append(cells)
+    return out
+
+
+def ago(ts: int, now: float | None = None) -> str:
+    secs = max(0, int((now or time.time()) - ts))
+    for unit, size in (("year", 31536000), ("month", 2592000), ("week", 604800),
+                       ("day", 86400), ("hour", 3600), ("minute", 60)):
+        if secs >= size:
+            n = secs // size
+            return f"{n} {unit}{'s' if n != 1 else ''} ago"
+    return "just now"
+
+
+# ----------------------------------------------------------------- previews
+
+def after_switch(g: Graph, branch: str) -> Graph:
+    """The graph once you've moved onto `branch`."""
+    out = copy.deepcopy(g)
+    for lane in out.lanes:
+        lane.current = lane.is_branch and lane.name == branch
+        if lane.current:
+            out.head = lane.tip
+    return out
+
+
+def after_new_branch(g: Graph, name: str, at: str) -> Graph:
+    """The graph once a new branch `name` starts at commit `at` and you're on it."""
+    out = copy.deepcopy(g)
+    for lane in out.lanes:
+        lane.current = False
+    row = next((i for i, l in enumerate(out.lanes) if any(c.sha == at for c in l.commits)), 0)
+    out.lanes.insert(row + 1, Lane(name, "branch", fork=at, current=True, tip=at,
+                                   badge="[green]new branch[/]"))
+    out.head = at
+    return out
+
+
+def after_save(g: Graph, message: str) -> Graph:
+    """The graph once your unsaved changes become a new commit where you are."""
+    out = copy.deepcopy(g)
+    lane = next((l for l in out.lanes if l.current), None)
+    if lane is None or out.head is None:
+        return out
+    new = Commit("(new save)", [out.head], int(time.time()), message)
+    if not lane.commits:
+        lane.fork = lane.fork or out.head
+    lane.commits.append(new)
+    lane.tip = out.head = new.sha
+    lane.badge = "[green]saved your changes[/]"
+    return out
+
+
+# ----------------------------------------------------------------- drawing
+
+def lane_color_for(lane: Lane) -> str:
+    """Same branch, same color, even when rows are added or reordered."""
+    if lane.kind == "trunk":
+        return LANE_COLORS[0]
+    name = lane.name.removesuffix(" on GitHub")
+    return LANE_COLORS[1 + zlib.crc32(name.encode()) % (len(LANE_COLORS) - 1)]
+
+
 def _glyph(c: Commit, head: str | None) -> str:
     if c.sha == head:
         return "◉"
@@ -250,15 +334,21 @@ def _glyph(c: Commit, head: str | None) -> str:
     return "◆" if c.is_merge else "●"
 
 
-def _note(lane: Lane, g: Graph, s: RepoState) -> str:
+def _here(lane: Lane, g: Graph) -> bool:
+    if lane.kind == "remote":
+        return False
+    return lane.current or (lane.kind == "detached" and any(c.sha == g.head for c in lane.commits))
+
+
+def _note(lane: Lane, g: Graph, s: RepoState, unsaved: int, compact: bool) -> str:
     parts = []
-    if lane.current or (lane.kind != "remote" and any(c.sha == g.head for c in lane.commits)
-                        and s.detached):
+    if _here(lane, g):
         here = "[b reverse] you are here [/]"
-        n = len({c.path for c in s.changes}) + len(s.untracked)
-        if n:
-            here += f" [yellow]✎ {n} unsaved file{'s' if n != 1 else ''}[/]"
+        if unsaved:
+            here += f" [yellow]✎ {unsaved} unsaved file{'s' if unsaved != 1 else ''}[/]"
         parts.append(here)
+    if compact:
+        return " [dim]·[/] ".join(parts + ([lane.badge] if lane.badge else []))
     if lane.kind == "remote":
         parts.append("[dim]GitHub has saves you don't, and you have saves it doesn't[/]")
     elif lane.kind == "detached":
@@ -267,7 +357,7 @@ def _note(lane: Lane, g: Graph, s: RepoState) -> str:
         parts.append(f"[dim]already combined into {escape(g.trunk or 'main')}[/]")
     elif not lane.commits:
         parts.append("[dim]no saves of its own yet[/]")
-    if lane.kind in ("trunk", "branch") and s.remotes:
+    if lane.is_branch and s.remotes:
         if not lane.upstream:
             parts.append("[dim]not on GitHub yet[/]")
         elif lane.ahead and lane.behind:
@@ -281,10 +371,17 @@ def _note(lane: Lane, g: Graph, s: RepoState) -> str:
     return " [dim]·[/] ".join(parts)
 
 
-def render(g: Graph, s: RepoState) -> str:
-    """The map as Rich markup, one line per lane."""
+def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
+           compact: bool = False, unsaved: int | None = None) -> str:
+    """The map as Rich markup, one line per lane.
+
+    selected: (lane index, column) to highlight. compact: only mark where you
+    are (for previews). unsaved: override the unsaved-file count shown.
+    """
     if not g.lanes:
         return "[dim]No saves yet. Use “Save my work” to make your first one.[/]"
+    if unsaved is None:
+        unsaved = len({c.path for c in s.changes}) + len(s.untracked)
     col = columns(g)
     ncols = max(col.values(), default=0) + 1
     row_of = {c.sha: i for i, lane in enumerate(g.lanes) for c in lane.commits}
@@ -293,7 +390,7 @@ def render(g: Graph, s: RepoState) -> str:
     color = [[LANE_COLORS[0]] * ncols for _ in g.lanes]
 
     for r, lane in enumerate(g.lanes):
-        lane_color = LANE_COLORS[0] if lane.kind == "trunk" else LANE_COLORS[1 + (r - 1) % (len(LANE_COLORS) - 1)]
+        lane_color = lane_color_for(lane)
         color[r] = [lane_color] * ncols
         cols = [col[c.sha] for c in lane.commits]
         fork_col = col.get(lane.fork) if lane.fork else None
@@ -323,7 +420,8 @@ def render(g: Graph, s: RepoState) -> str:
     for r, lane in enumerate(g.lanes):
         name = lane.name if len(lane.name) <= width - 2 else lane.name[: width - 3] + "…"
         label = ("▶ " if lane.current else "  ") + name
-        label = f"[b]{escape(label):<{width}}[/]" if lane.current else f"{escape(label):<{width}}"
+        bold = lane.current or (selected is not None and selected[0] == r)
+        label = f"[b]{escape(label):<{width}}[/]" if bold else f"{escape(label):<{width}}"
         cells = []
         remote = {c.sha for c in lane.commits if c.remote_only}
         for x in range(ncols):
@@ -332,12 +430,14 @@ def render(g: Graph, s: RepoState) -> str:
             style = "dim" if sha in remote or lane.kind == "remote" else colr
             if ch == "◉":
                 style = f"b reverse {colr}"
+            if selected == (r, x):
+                style = "b black on bright_yellow"
             cells.append(f"[{style}]{ch}[/][{'dim' if lane.kind == 'remote' else colr}]{ln}[/]"
                          if ch.strip() or ln.strip() else ch + ln)
         line = (label + "".join(cells)).rstrip()
-        note = _note(lane, g, s)
+        note = _note(lane, g, s, unsaved, compact)
         lines.append(line + ("  " + note if note else ""))
-    if g.hidden_branches:
+    if g.hidden_branches and not compact:
         lines.append(f"[dim]  … and {g.hidden_branches} more branch{'es' if g.hidden_branches != 1 else ''}[/]")
     return "\n".join(lines)
 

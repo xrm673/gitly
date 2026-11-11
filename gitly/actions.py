@@ -53,6 +53,32 @@ def switch_branch(name: str) -> Plan:
     return Plan("Switch branch", [Step(["switch", name], f"Move to the '{name}' branch.")])
 
 
+def from_map(title: str, steps: list[Step], summary: str = "", note: str = "",
+             preview: tuple[str, str] | None = None, save_first: Plan | None = None) -> Plan:
+    """A branch-map action, optionally preceded by saving unsaved changes."""
+    if save_first is not None:
+        steps = save_first.steps + steps
+        summary = f"{save_first.summary} Then: {summary[0].lower() + summary[1:]}" if summary else save_first.summary
+    return Plan(title, steps, summary=summary, note=note, source="map", preview=preview)
+
+
+def switch_steps(name: str, carrying: int) -> list[Step]:
+    why = f"Move to the '{name}' branch."
+    if carrying:
+        why += (f" Your {carrying} unsaved file{'s come' if carrying != 1 else ' comes'} with you: "
+                f"'{name}' doesn't change {'them' if carrying != 1 else 'it'}.")
+    return [Step(["switch", name], why)]
+
+
+def branch_steps(name: str, at: str | None, label: str, carrying: int) -> list[Step]:
+    """Create `name` at commit `at` (None = where you are) and move onto it."""
+    args = ["switch", "--create", name] + ([at] if at else [])
+    why = f"Make a new branch called '{name}' starting from {label} and move onto it."
+    if carrying:
+        why += " Your unsaved changes come with you."
+    return [Step(args, why)]
+
+
 def delete_branch(name: str) -> Plan:
     return Plan("Delete branch", [Step(
         ["branch", "--delete", name],

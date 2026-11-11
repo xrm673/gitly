@@ -95,6 +95,9 @@ class PlanScreen(ModalScreen):
                     yield Static(escape(p.note) if p.source == "ai" else p.note, classes="note")
                 if p.summary:
                     yield Static(escape(p.summary), classes="muted")
+                if p.preview:
+                    now, after = p.preview
+                    yield Static(f"[b]Now[/]\n{now}\n\n[b]After[/]\n{after}", classes="preview")
                 if p.steps:
                     yield Static("[b]This will run:[/]")
                 for i, st in enumerate(p.steps, 1):
@@ -241,44 +244,232 @@ class ThinkingScreen(ModalScreen):
 
 
 class MapScreen(Screen):
-    """The branch map (read-only for now)."""
+    """The branch map. Arrow keys pick a save; n and Enter act on it."""
 
     BINDINGS = [
         Binding("escape,q,m", "dismiss(None)", "Back"),
+        Binding("left", "move(0, -1)", "Move", show=False),
+        Binding("right", "move(0, 1)", "Move", show=False),
+        Binding("up", "move(-1, 0)", "Move", show=False),
+        Binding("down", "move(1, 0)", "Move", show=False),
+        Binding("n", "new_branch", "New branch from here"),
+        Binding("enter", "switch", "Switch to this branch"),
         Binding("r", "refresh_map", "Refresh"),
     ]
     CSS = """
     MapScreen { background: $surface; }
     #map-title { padding: 1 2 0 2; height: auto; }
-    #map-wrap { height: 1fr; margin: 1 2; border: round $accent; padding: 1 1; }
+    #map-wrap { height: 1fr; margin: 1 2 0 2; border: round $accent; padding: 1 1; }
     #map { width: auto; height: auto; }
-    #map-legend { padding: 0 2 1 2; height: auto; }
+    #map-detail { padding: 1 2 0 2; height: auto; }
+    #map-legend { padding: 1 2; height: auto; }
     """
 
     def __init__(self, cwd: str):
         super().__init__()
         self.cwd = cwd
+        self.s: git.RepoState | None = None
+        self.g: graph.Graph | None = None
+        self.cells: list[list[tuple[int, str]]] = []
+        self.sel: tuple[int, int] | None = None  # (lane index, index into its cells)
 
     def compose(self) -> ComposeResult:
         yield Static(id="map-title")
         with ScrollableContainer(id="map-wrap"):
             yield Static(id="map")
+        yield Static(id="map-detail")
         yield Static(graph.LEGEND, id="map-legend")
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#map-wrap").border_title = "Branch map"
+        wrap = self.query_one("#map-wrap")
+        wrap.border_title = "Branch map"
+        wrap.can_focus = False  # arrow keys move the selection, not the scroll
         self.action_refresh_map()
 
+    # ---- state
+
     def action_refresh_map(self) -> None:
-        s = git.state(self.cwd)
+        self.s = git.state(self.cwd)
         title = self.query_one("#map-title", Static)
-        if s is None:
+        if self.s is None:
             title.update("This folder isn't a git project yet.")
             return
-        g = graph.build(s)
-        title.update(f"[b]Your branches[/]  [dim]{escape(s.root)}[/]\n{s.summary()}")
-        self.query_one("#map", Static).update(graph.render(g, s))
+        title.update(f"[b]Your branches[/]  [dim]{escape(self.s.root)}[/]\n{self.s.summary()}")
+        self.g = graph.build(self.s)
+        self.cells = graph.positions(self.g)
+        self.sel = self._find(self.s.head_sha) or next(
+            ((r, 0) for r, c in enumerate(self.cells) if c), None)
+        self._draw()
+
+    def _find(self, sha: str | None) -> tuple[int, int] | None:
+        for r, cells in enumerate(self.cells):
+            for i, (_, cell_sha) in enumerate(cells):
+                if cell_sha == sha and (self.g.lanes[r].commits or self.g.lanes[r].current):
+                    return r, i
+        for r, cells in enumerate(self.cells):  # fall back to any row showing it
+            for i, (_, cell_sha) in enumerate(cells):
+                if cell_sha == sha:
+                    return r, i
+        return None
+
+    def selected(self) -> tuple[graph.Lane, str] | None:
+        if self.sel is None or self.g is None:
+            return None
+        r, i = self.sel
+        return self.g.lanes[r], self.cells[r][i][1]
+
+    def _draw(self) -> None:
+        if self.g is None or self.s is None:
+            return
+        cell = (self.sel[0], self.cells[self.sel[0]][self.sel[1]][0]) if self.sel else None
+        self.query_one("#map", Static).update(graph.render(self.g, self.s, selected=cell))
+        self.query_one("#map-detail", Static).update(self._detail())
+
+    def _detail(self) -> str:
+        sel = self.selected()
+        if sel is None:
+            return "[dim]Nothing to select yet.[/]"
+        lane, sha = sel
+        c = self.g.commit(sha)
+        if lane.commits:
+            where = "only on GitHub" if c and c.remote_only else f"on {escape(lane.name)}"
+            head = (f"[b]“{escape(c.subject)}”[/]  [dim]{sha[:7]} · {graph.ago(c.time)} · {where}[/]"
+                    if c else f"[dim]{sha[:7]}[/]")
+        else:
+            head = (f"[b]{escape(lane.name)}[/] starts at “{escape(c.subject) if c else sha[:7]}” "
+                    "[dim]and has no saves of its own yet[/]")
+        keys = ["[b]n[/] new branch from here"]
+        if lane.is_branch and not lane.current:
+            keys.append(f"[b]enter[/] switch to {escape(lane.name)}")
+        keys += ["[b]← ↑ ↓ →[/] pick a save", "[b]esc[/] back"]
+        return head + "\n" + "   ".join(keys)
+
+    def action_move(self, dr: int, dc: int) -> None:
+        if self.sel is None:
+            return
+        r, i = self.sel
+        if dc:
+            i = max(0, min(len(self.cells[r]) - 1, i + dc))
+        else:
+            x = self.cells[r][i][0]
+            rr = r + dr
+            while 0 <= rr < len(self.cells) and not self.cells[rr]:
+                rr += dr
+            if not 0 <= rr < len(self.cells):
+                return
+            r, i = rr, min(range(len(self.cells[rr])), key=lambda j: abs(self.cells[rr][j][0] - x))
+        self.sel = (r, i)
+        self._draw()
+        x = self.cells[r][i][0]
+        wrap = self.query_one("#map-wrap")
+        cell_x = 22 + 3 * x  # label width + 3 characters per column
+        if not wrap.scroll_x <= cell_x < wrap.scroll_x + wrap.size.width - 4:
+            wrap.scroll_to(x=max(0, cell_x - wrap.size.width // 2), animate=False)
+
+    # ---- actions
+
+    def _busy_reason(self) -> str | None:
+        s = self.s
+        if s is None or self.selected() is None:
+            return "Nothing to act on yet."
+        if s.conflicts or s.merging or s.rebasing:
+            return "Finish or cancel the merge in progress first (main screen)."
+        return None
+
+    async def _make_room(self, target: str, where: str) -> tuple[bool, Plan | None]:
+        """Unsaved files that `target` also changes block the move. Returns (go on?, save plan)."""
+        s = self.s
+        blocking = await asyncio.to_thread(git.unsaved_in_the_way, s, target)
+        if not blocking:
+            return True, None
+        shown = ", ".join(escape(b) for b in blocking[:5]) + (" …" if len(blocking) > 5 else "")
+        choice = await self.app.push_screen_wait(ChooseScreen(
+            "Your unsaved changes are in the way", [
+                ("save", "Save my changes first, then go  [dim](recommended)[/]"),
+                ("cancel", "Cancel"),
+            ], hint=(f"You changed [b]{shown}[/], and {where} has a different version. "
+                     "Git won't move without overwriting your edits. Saving them first keeps "
+                     "them safe on the branch you're on now.")))
+        self.app.log_.event("map_in_the_way", files=len(blocking), choice=choice or "cancel")
+        if choice != "save":
+            return False, None
+        save = await self.app.prepare_save(s)
+        return save is not None, save
+
+    def _unsaved(self) -> int:
+        return len({c.path for c in self.s.changes}) + len(self.s.untracked)
+
+    @work(exclusive=True, group="map")
+    async def action_new_branch(self) -> None:
+        if reason := self._busy_reason():
+            self.notify(reason, severity="warning")
+            return
+        lane, sha = self.selected()
+        s, g = self.s, self.g
+        here = sha == s.head_sha
+        c = g.commit(sha)
+        label = "where you are" if here else f"the save “{c.subject if c else sha[:7]}”"
+        name = await self.app.push_screen_wait(AskTextScreen(
+            "New branch", placeholder="e.g. dark-mode",
+            hint=f"It starts from {escape(label)}. Pick a short name, no spaces."))
+        if not name:
+            return
+        name = name.strip().replace(" ", "-")
+        if name in git.branches(s.root):
+            self.notify(f"There's already a branch called '{name}'.", severity="warning")
+            return
+        if not git.valid_branch_name(s.root, name):
+            self.notify(f"'{name}' can't be a branch name. Try letters, numbers and dashes.",
+                        severity="warning")
+            return
+        ok, save = (True, None) if here else await self._make_room(sha, label)
+        if not ok:
+            return
+        before = graph.after_save(g, save.steps[-1].args[-1]) if save else g
+        after = graph.after_new_branch(before, name, sha)
+        carrying = 0 if save else self._unsaved()
+        plan = actions.from_map(
+            "New branch", actions.branch_steps(name, None if here else sha[:12], label, carrying),
+            summary=f"Start '{name}' from {label}.",
+            preview=(graph.render(g, s, compact=True),
+                     graph.render(after, s, compact=True, unsaved=carrying)),
+            save_first=save)
+        self.app.log_.event("map_action", action="new_branch", here=here, save_first=save is not None)
+        await self.app.execute(plan)
+        self.action_refresh_map()
+
+    @work(exclusive=True, group="map")
+    async def action_switch(self) -> None:
+        if reason := self._busy_reason():
+            self.notify(reason, severity="warning")
+            return
+        lane, _ = self.selected()
+        if lane.kind == "remote":
+            self.notify("This row is GitHub's copy. Use “Get latest” on the main screen to bring it in.")
+            return
+        if not lane.is_branch:
+            self.notify("That's not a branch. Press n to start a branch there.")
+            return
+        if lane.current:
+            self.notify(f"You're already on {lane.name}.")
+            return
+        s, g = self.s, self.g
+        ok, save = await self._make_room(lane.name, f"'{lane.name}'")
+        if not ok:
+            return
+        before = graph.after_save(g, save.steps[-1].args[-1]) if save else g
+        after = graph.after_switch(before, lane.name)
+        carrying = 0 if save else self._unsaved()
+        plan = actions.from_map(
+            "Switch branch", actions.switch_steps(lane.name, carrying),
+            summary=f"Move to '{lane.name}'.",
+            preview=(graph.render(g, s, compact=True),
+                     graph.render(after, s, compact=True, unsaved=carrying)),
+            save_first=save)
+        self.app.log_.event("map_action", action="switch", carrying=carrying, save_first=save is not None)
+        await self.app.execute(plan)
+        self.action_refresh_map()
 
 
 # ----------------------------------------------------------------- main app
@@ -304,6 +495,7 @@ class Gitly(App):
     .plan-body { height: auto; max-height: 24; }
     .step { margin: 0 0 1 0; }
     .note { margin-bottom: 1; }
+    .preview { margin-bottom: 1; text-wrap: nowrap; text-overflow: ellipsis; }
     .muted { color: $text-muted; margin-bottom: 1; }
     .raw { margin-top: 1; }
     .buttons { height: auto; margin-top: 1; }
@@ -479,37 +671,11 @@ class Gitly(App):
             if not s.dirty:
                 self.notify("Nothing to save: no changes since your last save.")
                 return
-            findings = await asyncio.to_thread(precheck.check, s)
-            to_save = s
-            if findings:
-                choice = await self.push_screen_wait(PrecheckScreen(findings))
-                self.log_.event("precheck", kinds=[f.kind for f in findings], choice=choice or "cancel")
-                if choice is None:
-                    return
-                if choice == "leave_out":
-                    to_save = precheck.without(s, findings)
-                else:
-                    findings = []
-            suggestion = ""
-            if ai.available() and to_save.dirty:
-                suggestion = await self.with_ai(
-                    ai.suggest_commit_message, to_save, doing="writing a description of your changes",
-                    event="ai_commit_message") or ""
-            hint = "Describe what you changed in a few words. This label helps you find this save later."
-            if suggestion:
-                hint = "The AI suggested this from your changes. Edit it, or press Enter to keep it."
-            msg = await self.push_screen_wait(AskTextScreen(
-                "Save my work", placeholder="e.g. add login page", hint=hint, value=suggestion))
-            if suggestion:
-                self.log_.event("ai_commit_message_choice",
-                                choice="cancelled" if not msg else "kept" if msg == suggestion else "edited")
-            if msg:
-                plan = (precheck.save_leaving_out(s, findings, msg) if findings
-                        else actions.save_work(s, msg))
+            plan = await self.prepare_save(s)
         elif key == "explain":
             await self.explain_flow(s)
         elif key == "map":
-            await self.push_screen_wait(MapScreen(self.cwd))
+            self.push_screen(MapScreen(self.cwd))
         elif key == "upload":
             plan = actions.upload(s)
         elif key == "pull":
@@ -594,6 +760,36 @@ class Gitly(App):
             "Connect to GitHub", placeholder="https://github.com/you/project.git",
             hint="Create an empty repository on github.com, then paste its URL here."))
         return actions.connect_remote(url) if url else None
+
+    async def prepare_save(self, s: git.RepoState) -> Plan | None:
+        """Pre-save check, AI description, and message prompt. Returns the save plan or None."""
+        findings = await asyncio.to_thread(precheck.check, s)
+        to_save = s
+        if findings:
+            choice = await self.push_screen_wait(PrecheckScreen(findings))
+            self.log_.event("precheck", kinds=[f.kind for f in findings], choice=choice or "cancel")
+            if choice is None:
+                return None
+            if choice == "leave_out":
+                to_save = precheck.without(s, findings)
+            else:
+                findings = []
+        suggestion = ""
+        if ai.available() and to_save.dirty:
+            suggestion = await self.with_ai(
+                ai.suggest_commit_message, to_save, doing="writing a description of your changes",
+                event="ai_commit_message") or ""
+        hint = "Describe what you changed in a few words. This label helps you find this save later."
+        if suggestion:
+            hint = "The AI suggested this from your changes. Edit it, or press Enter to keep it."
+        msg = await self.push_screen_wait(AskTextScreen(
+            "Save my work", placeholder="e.g. add login page", hint=hint, value=suggestion))
+        if suggestion:
+            self.log_.event("ai_commit_message_choice",
+                            choice="cancelled" if not msg else "kept" if msg == suggestion else "edited")
+        if not msg:
+            return None
+        return precheck.save_leaving_out(s, findings, msg) if findings else actions.save_work(s, msg)
 
     async def ai_setup_help(self) -> None:
         await self.push_screen_wait(TextScreen("AI isn't set up", (

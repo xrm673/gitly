@@ -149,3 +149,43 @@ def test_parents_left_of_children():
     g = graph.Graph("main", [graph.Lane("main", "trunk", [a, b])], "b")
     col = graph.columns(g)
     assert col["a"] < col["b"]
+
+
+def test_positions_and_previews(repo):
+    commit(repo, "second")
+    sh(repo, "switch", "-qc", "login")
+    commit(repo, "login form")
+    sh(repo, "switch", "-q", "main")
+    s = git.state(repo)
+    g = graph.build(s)
+    cells = graph.positions(g)
+    assert [len(c) for c in cells] == [2, 1]  # main: first, second; login: login form
+
+    first = lane(g, "main").commits[0].sha
+    new = graph.after_new_branch(g, "idea", first)
+    idea = lane(new, "idea")
+    assert idea.current and idea.fork == first and new.head == first
+    assert not lane(new, "main").current and lane(g, "main").current  # original untouched
+    text = Text.from_markup(graph.render(new, s, compact=True)).plain
+    assert "idea" in text and "new branch" in text and "in sync" not in text
+
+    moved = graph.after_switch(g, "login")
+    assert lane(moved, "login").current and moved.head == lane(g, "login").tip
+
+    saved = graph.after_save(g, "wip")
+    assert lane(saved, "main").commits[-1].subject == "wip" and saved.head == "(new save)"
+
+
+def test_render_highlights_selection(repo):
+    commit(repo, "second")
+    s = git.state(repo)
+    g = graph.build(s)
+    x = graph.positions(g)[0][0][0]
+    assert "on bright_yellow" in graph.render(g, s, selected=(0, x))
+    assert "on bright_yellow" not in graph.render(g, s)
+
+
+def test_ago():
+    assert graph.ago(1000, now=1000) == "just now"
+    assert graph.ago(1000, now=1000 + 3 * 3600) == "3 hours ago"
+    assert graph.ago(1000, now=1000 + 86400) == "1 day ago"

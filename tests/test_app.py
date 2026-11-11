@@ -259,3 +259,108 @@ async def test_branch_map_opens_and_closes(repo):
         await pilot.press("escape")
         await pilot.pause()
         assert app.screen is app.screen_stack[0]
+
+
+async def wait_for(pilot, cls, tries=60):
+    for _ in range(tries):
+        await pilot.pause(0.05)
+        if isinstance(pilot.app.screen, cls):
+            return pilot.app.screen
+    raise AssertionError(f"never reached {cls.__name__}, at {type(pilot.app.screen).__name__}")
+
+
+async def test_map_new_branch_from_older_save(repo):
+    from gitly.app import MapScreen
+
+    (repo / "b.txt").write_text("b"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "second")
+    first = sh(repo, "rev-parse", "HEAD~1").strip()
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("m")
+        screen = await wait_for(pilot, MapScreen)
+        assert screen.selected()[1] == sh(repo, "rev-parse", "HEAD").strip()  # starts at HEAD
+        await pilot.press("left")
+        assert screen.selected()[1] == first
+        assert "“first”" in str(screen.query_one("#map-detail").render())
+        await pilot.press("n")
+        await wait_for(pilot, AskTextScreen)
+        await pilot.press(*"old idea", "enter")
+        plan_screen = await wait_for(pilot, PlanScreen)
+        assert plan_screen.plan.steps[0].args == ["switch", "--create", "old-idea", first[:12]]
+        preview = str(plan_screen.query_one(".preview").render())
+        assert "Now" in preview and "After" in preview and "new branch" in preview
+        await pilot.press("enter")
+        await wait_for(pilot, MapScreen)
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "old-idea" in str(screen.query_one("#map").render())
+    assert sh(repo, "branch", "--show-current").strip() == "old-idea"
+    assert sh(repo, "rev-parse", "HEAD").strip() == first
+
+
+async def test_map_switch_carries_unsaved_changes(repo):
+    from gitly.app import MapScreen
+
+    sh(repo, "switch", "-qc", "login")
+    (repo / "l.txt").write_text("l"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "login form")
+    sh(repo, "switch", "-q", "main")
+    (repo / "notes.txt").write_text("unsaved\n")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("m")
+        screen = await wait_for(pilot, MapScreen)
+        await pilot.press("down")
+        assert screen.selected()[0].name == "login"
+        await pilot.press("enter")
+        plan_screen = await wait_for(pilot, PlanScreen)
+        assert [st.args for st in plan_screen.plan.steps] == [["switch", "login"]]
+        assert "comes with you" in plan_screen.plan.steps[0].why
+        await pilot.press("enter")
+        await wait_for(pilot, MapScreen)
+        await app.workers.wait_for_complete()
+    assert sh(repo, "branch", "--show-current").strip() == "login"
+    assert (repo / "notes.txt").read_text() == "unsaved\n"
+
+
+async def test_map_switch_saves_first_when_in_the_way(repo):
+    from gitly.app import ChooseScreen, MapScreen
+
+    sh(repo, "switch", "-qc", "login")
+    (repo / "a.txt").write_text("login version\n"); sh(repo, "commit", "-qam", "login edit")
+    sh(repo, "switch", "-q", "main")
+    (repo / "a.txt").write_text("my unsaved edit\n")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("m")
+        await wait_for(pilot, MapScreen)
+        await pilot.press("down", "enter")
+        choose_screen = await wait_for(pilot, ChooseScreen)
+        assert "a.txt" in str(choose_screen.query("Static")[1].render())
+        await pilot.press("enter")  # save first
+        await wait_for(pilot, AskTextScreen)
+        await pilot.press(*"my edit", "enter")
+        plan_screen = await wait_for(pilot, PlanScreen)
+        assert [st.args[0] for st in plan_screen.plan.steps] == ["add", "commit", "switch"]
+        await pilot.press("enter")
+        await wait_for(pilot, MapScreen)
+        await app.workers.wait_for_complete()
+    assert sh(repo, "branch", "--show-current").strip() == "login"
+    assert sh(repo, "log", "-1", "--format=%s", "main").strip() == "my edit"
+    assert sh(repo, "show", "main:a.txt") == "my unsaved edit\n"
+
+
+async def test_map_rejects_bad_names_and_remote_rows(repo):
+    from gitly.app import MapScreen
+
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("m")
+        await wait_for(pilot, MapScreen)
+        await pilot.press("enter")  # already on main
+        await pilot.pause()
+        await pilot.press("n")
+        await wait_for(pilot, AskTextScreen)
+        await pilot.press(*"main", "enter")  # exists
+        await wait_for(pilot, MapScreen)
+        await app.workers.wait_for_complete()
+    assert sh(repo, "branch", "--format=%(refname:short)").split() == ["main"]

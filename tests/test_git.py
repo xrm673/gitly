@@ -95,3 +95,23 @@ def test_working_diff_before_first_commit(tmp_path):
     (tmp_path / "b.txt").write_text("world\n")
     d = git.working_diff(git.state(tmp_path))
     assert "+hello" in d and "+world" in d
+
+
+def test_unsaved_in_the_way(repo):
+    sh(repo, "switch", "-qc", "other")
+    (repo / "a.txt").write_text("other version\n")
+    (repo / "b.txt").write_text("only on other\n")
+    sh(repo, "add", "."); sh(repo, "commit", "-qm", "other")
+    sh(repo, "switch", "-q", "main")
+    s = git.state(repo)
+    assert git.unsaved_in_the_way(s, "other") == []  # nothing unsaved
+    (repo / "c.txt").write_text("unrelated\n")
+    assert git.unsaved_in_the_way(git.state(repo), "other") == []  # comes along fine
+    (repo / "a.txt").write_text("my edit\n")
+    (repo / "b.txt").write_text("my new file\n")  # untracked here, tracked there
+    assert git.unsaved_in_the_way(git.state(repo), "other") == ["a.txt", "b.txt"]
+
+
+def test_valid_branch_name(repo):
+    assert git.valid_branch_name(repo, "dark-mode")
+    assert not git.valid_branch_name(repo, "bad..name")

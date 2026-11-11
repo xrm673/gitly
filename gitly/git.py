@@ -232,6 +232,23 @@ def branches(cwd: str | Path) -> list[str]:
     return [b for b in r.stdout.splitlines() if b]
 
 
+def unsaved_in_the_way(s: RepoState, target: str) -> list[str]:
+    """Unsaved files that are also different on `target`.
+
+    Git carries unsaved changes along when you move to another commit, unless
+    that commit has a different version of the same file. Then it refuses.
+    """
+    unsaved = {c.path for c in s.changes} | set(s.untracked) | set(s.conflicts)
+    if not unsaved or not s.head_sha:
+        return []
+    r = run(["diff", "--name-only", "--no-renames", "-z", "HEAD", target, "--"], s.root)
+    return sorted(unsaved & set(r.stdout.split("\0")))
+
+
+def valid_branch_name(root: str | Path, name: str) -> bool:
+    return run(["check-ref-format", "--branch", name], root).ok
+
+
 def recent_log(cwd: str | Path, n: int = 20) -> list[str]:
     r = run(["log", f"-{n}", "--format=%h  %ar  %an  %s"], cwd)
     return r.stdout.splitlines() if r.ok else []
