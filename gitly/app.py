@@ -15,7 +15,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, LoadingIndicator, OptionList, Static
 from textual.widgets.option_list import Option
 
-from . import actions, ai, git, rescue, safety
+from . import actions, ai, git, precheck, rescue, safety
 from .plan import Plan
 from .studylog import StudyLog
 
@@ -98,7 +98,7 @@ class PlanScreen(ModalScreen):
                 if p.steps:
                     yield Static("[b]This will run:[/]")
                 for i, st in enumerate(p.steps, 1):
-                    cmd = escape(git.display(st.args))
+                    cmd = escape(st.display)
                     badge = RISK_BADGE[st.risk]
                     blocked = f"\n   [red]✗ blocked: {escape(st.blocked)}[/]" if st.blocked else ""
                     yield Static(f"{i}. [b reverse] {cmd} [/]  {badge}\n   {escape(st.why)}{blocked}",
@@ -177,6 +177,41 @@ class ProblemScreen(ModalScreen):
     def chosen(self, event: OptionList.OptionSelected) -> None:
         oid = event.option.id
         self.dismiss(None if oid == "close" else oid)
+
+
+class PrecheckScreen(ModalScreen):
+    """Warn about risky files before a save. Returns 'leave_out', 'anyway', or None."""
+
+    BINDINGS = [Binding("escape", "dismiss(None)", "Cancel")]
+
+    def __init__(self, findings: list[precheck.Finding]):
+        super().__init__()
+        self.findings = findings
+
+    def compose(self) -> ComposeResult:
+        n = len(self.findings)
+        with Vertical(classes="dialog wide"):
+            yield Static(f"[b yellow]⚠[/] [b]Check {'this' if n == 1 else 'these'} before saving[/]",
+                         classes="dialog-title")
+            with VerticalScroll(classes="plan-body"):
+                for f in self.findings:
+                    extra = (f"\n   [dim]Will be added to .gitignore as {escape(f.gitignore)}[/]"
+                             if f.gitignore else "")
+                    yield Static(f"[b]{escape(f.headline)}[/]  {escape(f.path)}\n   {escape(f.detail)}{extra}",
+                                 classes="step")
+            yield OptionList(
+                Option("Leave these out and save the rest  [dim](recommended)[/]", id="leave_out"),
+                Option("Save everything anyway", id="anyway"),
+                Option("Cancel, I'll fix it myself", id="cancel"),
+            )
+
+    def on_mount(self) -> None:
+        self.query_one(OptionList).focus()
+
+    @on(OptionList.OptionSelected)
+    def chosen(self, event: OptionList.OptionSelected) -> None:
+        oid = event.option.id
+        self.dismiss(None if oid == "cancel" else oid)
 
 
 class TextScreen(ModalScreen):
@@ -397,10 +432,21 @@ class Gitly(App):
             if not s.dirty:
                 self.notify("Nothing to save: no changes since your last save.")
                 return
+            findings = await asyncio.to_thread(precheck.check, s)
+            to_save = s
+            if findings:
+                choice = await self.push_screen_wait(PrecheckScreen(findings))
+                self.log_.event("precheck", kinds=[f.kind for f in findings], choice=choice or "cancel")
+                if choice is None:
+                    return
+                if choice == "leave_out":
+                    to_save = precheck.without(s, findings)
+                else:
+                    findings = []
             suggestion = ""
-            if ai.available():
+            if ai.available() and to_save.dirty:
                 suggestion = await self.with_ai(
-                    ai.suggest_commit_message, s, doing="writing a description of your changes",
+                    ai.suggest_commit_message, to_save, doing="writing a description of your changes",
                     event="ai_commit_message") or ""
             hint = "Describe what you changed in a few words. This label helps you find this save later."
             if suggestion:
@@ -411,7 +457,8 @@ class Gitly(App):
                 self.log_.event("ai_commit_message_choice",
                                 choice="cancelled" if not msg else "kept" if msg == suggestion else "edited")
             if msg:
-                plan = actions.save_work(s, msg)
+                plan = (precheck.save_leaving_out(s, findings, msg) if findings
+                        else actions.save_work(s, msg))
         elif key == "explain":
             await self.explain_flow(s)
         elif key == "upload":
@@ -580,9 +627,12 @@ class Gitly(App):
 
         last: git.Result | None = None
         for st in plan.steps:
-            last = await asyncio.to_thread(git.run, st.args, root)
-            log.event("step", args=st.args, code=last.code, seconds=round(last.seconds, 2),
-                      source=plan.source)
+            if st.gitignore:
+                last = await asyncio.to_thread(git.append_gitignore, root, st.gitignore)
+            else:
+                last = await asyncio.to_thread(git.run, st.args, root)
+            log.event("step", args=st.args, gitignore=len(st.gitignore), code=last.code,
+                      seconds=round(last.seconds, 2), source=plan.source)
             if not last.ok:
                 break
 

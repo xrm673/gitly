@@ -60,6 +60,26 @@ a risk level. You see the plan and confirm it before anything runs.
 | careful | `pull`, `reset --soft`, `branch --delete` | Enter runs it, marked yellow |
 | risky | `reset --hard`, `push --force`, `clean` | You type `yes`; gitly saves a backup first |
 
+**Pre-save check.** Before **Save my work**, gitly looks at what the save would
+include and warns about:
+
+- secrets files: `.env*` (not `.env.example`), `*.pem`, `*.key`, `id_rsa`,
+  `credentials.json`, `.npmrc`, …
+- API keys pasted into code (Anthropic, OpenAI, Stripe live, AWS, GitHub,
+  Slack, Google, private key blocks), with the line number
+- generated folders and clutter: `node_modules/`, `.venv/`, `__pycache__/`,
+  `.next/`, `.DS_Store`, …
+- files over 50 MB (GitHub rejects files over 100 MB)
+
+The recommended fix, **Leave these out and save the rest**, is a normal plan you
+review first: new files are added to `.gitignore` so the warning doesn't come
+back, and anything `.gitignore` can't help with (a key inside `app.py`, a
+secrets file that was already committed) is left out of this one save with a
+pathspec. Files on disk are never deleted. Adding lines to `.gitignore` is the
+only plan step that isn't a git command; the AI can't produce it. The check is
+plain pattern matching, so it's instant and works without an API key. See
+`gitly/precheck.py` and `gitly/secretscan.py`.
+
 **Backups.** Before any risky plan, gitly stores the current commit and any
 uncommitted work under `refs/gitly/backup/…` (via `git stash create`, which
 doesn't touch your files). Get it back with **Undo → Restore a gitly backup**.
@@ -81,8 +101,9 @@ accidental (leftover debug code, a deleted feature, a secrets file).
 **What gets sent to the AI.** Both features send the unsaved diff to the
 Anthropic API: tracked edits plus new files, capped at about 3,000 characters
 per file and 12,000 in total. Files that look like secrets (`.env*`, `*.pem`,
-`*.key`, `id_rsa`, `.npmrc`, `credentials.json`, …) are listed by name only;
-their contents are never sent. Set `GITLY_AI_SEND_CODE=0` to send file names
+`*.key`, `id_rsa`, `.npmrc`, `credentials.json`, …) are listed by name only,
+API keys found in other files are replaced with `[secret removed by gitly]`,
+and files you chose to leave out of the save aren't sent at all. Set `GITLY_AI_SEND_CODE=0` to send file names
 only, with no contents at all. See `working_diff()` in `gitly/git.py`.
 
 **AI guardrails.** The model returns structured JSON (a list of git argument
@@ -112,6 +133,8 @@ Override the folder with `GITLY_LOG_DIR`.
 | `gitly/git.py` | Runs the real `git` CLI; parses status; backups |
 | `gitly/actions.py` | The no-AI menu plans |
 | `gitly/rescue.py` | Error pattern → explanation + fixes |
+| `gitly/precheck.py` | Pre-save check: findings + the "leave these out" plan |
+| `gitly/secretscan.py` | Secret file names and API key patterns |
 | `gitly/safety.py` | Risk levels and blocked commands |
 | `gitly/ai.py` | AI features (Anthropic API): Ask → plan, save descriptions, change summaries |
 | `gitly/studylog.py` | Opt-in JSONL event log |

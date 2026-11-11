@@ -2,26 +2,39 @@
 
 Every action in gitly (menus, rescue fixes, AI suggestions) produces a Plan.
 The user always sees the Plan before anything runs.
+
+A step is normally a git command. The one exception is a gitly-made step that
+adds lines to .gitignore (from the pre-save check); the AI can't produce it.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import safety
+from . import git, safety
 
 
 @dataclass
 class Step:
     args: list[str]  # without the leading "git"
     why: str
+    gitignore: list[str] = field(default_factory=list)  # set: add these lines to .gitignore instead
+
+    @property
+    def display(self) -> str:
+        if self.gitignore:
+            return "add to .gitignore: " + "  ".join(self.gitignore)
+        return git.display(self.args)
 
     @property
     def risk(self) -> str:
-        return safety.risk(self.args)
+        return safety.SAFE if self.gitignore else safety.risk(self.args)
 
     @property
     def blocked(self) -> str | None:
+        if self.gitignore:
+            bad = [e for e in self.gitignore if not e.strip() or "\n" in e or "\r" in e]
+            return "a .gitignore line can't be empty or contain newlines" if bad else None
         return safety.blocked_reason(self.args)
 
 

@@ -197,3 +197,48 @@ async def test_explain_hidden_when_clean(repo):
         menu = app.query_one("#menu")
         ids = [menu.get_option_at_index(i).id for i in range(menu.option_count)]
         assert "explain" not in ids and "save" in ids
+
+
+async def test_precheck_leaves_out_secrets(repo):
+    from gitly.app import PrecheckScreen
+
+    (repo / "a.txt").write_text("edited\n")
+    (repo / ".env").write_text("A=1\n")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await choose(pilot, "save")
+        for _ in range(50):
+            await pilot.pause(0.05)
+            if isinstance(app.screen, PrecheckScreen):
+                break
+        assert isinstance(app.screen, PrecheckScreen)
+        await pilot.press("enter")  # "Leave these out" is first
+        await pilot.pause()
+        assert isinstance(app.screen, AskTextScreen)
+        await pilot.press(*"edit a", "enter")
+        await pilot.pause()
+        assert isinstance(app.screen, PlanScreen)
+        assert "add to .gitignore: .env" in str(app.screen.query(".step").first().render())
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+    assert sorted(sh(repo, "show", "--name-only", "--format=", "HEAD").split()) == [".gitignore", "a.txt"]
+
+
+async def test_precheck_cancel_saves_nothing(repo):
+    from gitly.app import PrecheckScreen
+
+    (repo / ".env").write_text("A=1\n")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await choose(pilot, "save")
+        for _ in range(50):
+            await pilot.pause(0.05)
+            if isinstance(app.screen, PrecheckScreen):
+                break
+        await pilot.press("escape")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        assert app.screen is app.screen_stack[0]
+    assert sh(repo, "log", "--format=%s").splitlines() == ["first"]
+    assert not (repo / ".gitignore").exists()

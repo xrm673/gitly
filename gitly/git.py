@@ -14,6 +14,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import secretscan
+
 # Never let git open an editor, pager, or password prompt inside the TUI:
 # any of those would hang the app. Failures surface as stderr we can rescue.
 GIT_OVERRIDES = {
@@ -88,6 +90,8 @@ class RepoState:
     merging: bool = False
     rebasing: bool = False
     remotes: list[str] = field(default_factory=list)
+    # Paths (or folders ending in "/") the user chose to leave out of the next save.
+    left_out: list[str] = field(default_factory=list)
 
     @property
     def detached(self) -> bool:
@@ -147,6 +151,8 @@ class RepoState:
             lines.append(f"  untracked: {u}")
         for c in self.conflicts:
             lines.append(f"  CONFLICT: {c}")
+        if self.left_out:
+            lines.append(f"left out of this save: {', '.join(self.left_out[:20])}")
         return "\n".join(lines)
 
 
@@ -231,14 +237,6 @@ def recent_log(cwd: str | Path, n: int = 20) -> list[str]:
     return r.stdout.splitlines() if r.ok else []
 
 
-# Files whose contents must never leave the machine. The AI sees only their names.
-SENSITIVE = re.compile(
-    r"(^|/)(\.env(\..*)?|.*\.(pem|key|p12|pfx|keystore)|id_(rsa|dsa|ecdsa|ed25519)"
-    r"|\.npmrc|\.pypirc|\.netrc|credentials(\.json)?|secrets?\.(json|ya?ml|toml))$",
-    re.IGNORECASE,
-)
-
-
 def _patch_chunks(patch: str) -> list[str]:
     return [c for c in re.split(r"(?m)^(?=diff --git )", patch) if c.startswith("diff --git ")]
 
@@ -248,11 +246,17 @@ def _chunk_path(chunk: str) -> str:
     return header.rsplit(" b/", 1)[-1].strip('"')
 
 
+def covers(entry: str, path: str) -> bool:
+    """Does a left-out entry (a file, or a folder ending in "/") include `path`?"""
+    return path == entry or (entry.endswith("/") and (path.startswith(entry) or f"/{entry}" in f"/{path}"))
+
+
 def working_diff(s: RepoState, max_chars: int = 12000, per_file: int = 3000) -> str:
     """What a save would include (tracked edits + new files) as a patch, for the AI.
 
-    Contents of secret-looking files are replaced by a one-line note, each file
-    is capped at `per_file` characters, and the whole thing at `max_chars`.
+    Secret files are replaced by a one-line note, API keys in other files are
+    redacted, paths in s.left_out are skipped, each file is capped at
+    `per_file` characters, and the whole thing at `max_chars`.
     """
     base = s.head_sha or run(["hash-object", "-t", "tree", "/dev/null"], s.root).stdout.strip()
     chunks = _patch_chunks(run(["diff", "--no-ext-diff", "--no-textconv", "-M", base], s.root).stdout)
@@ -263,11 +267,15 @@ def working_diff(s: RepoState, max_chars: int = 12000, per_file: int = 3000) -> 
         r = run(["diff", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", path], s.root)
         chunks += _patch_chunks(r.stdout)
 
+    if s.left_out:
+        chunks = [c for c in chunks if not any(covers(e, _chunk_path(c)) for e in s.left_out)]
+
     out: list[str] = []
     used = 0
     for i, chunk in enumerate(chunks):
         path = _chunk_path(chunk)
-        if SENSITIVE.search(path):
+        chunk = secretscan.redact(chunk)
+        if secretscan.is_secret_file(path):
             chunk = f"diff --git a/{path} b/{path}\n[contents not shared: looks like a secrets file]\n"
         elif len(chunk) > per_file:
             chunk = chunk[:per_file] + "\n[... rest of this file's changes left out]\n"
@@ -277,6 +285,27 @@ def working_diff(s: RepoState, max_chars: int = 12000, per_file: int = 3000) -> 
         out.append(chunk)
         used += len(chunk)
     return "".join(out).strip()
+
+
+def append_gitignore(root: str | Path, entries: list[str]) -> Result:
+    """Add lines to the project's .gitignore (skipping ones already there).
+
+    This is the one change gitly makes without git; plans show it as its own step.
+    """
+    start = time.monotonic()
+    path = Path(root) / ".gitignore"
+    try:
+        existing = path.read_text() if path.exists() else ""
+        have = {line.strip() for line in existing.splitlines()}
+        new = [e for e in entries if e not in have]
+        if new:
+            sep = "" if not existing or existing.endswith("\n") else "\n"
+            block = ("\n" if existing else "") + "# Added by gitly: keep these out of your saves\n"
+            path.write_text(existing + sep + block + "\n".join(new) + "\n")
+        msg = f"Added {len(new)} line(s) to .gitignore" if new else ".gitignore already had these"
+        return Result(["(edit .gitignore)"], 0, msg, "", time.monotonic() - start)
+    except OSError as e:
+        return Result(["(edit .gitignore)"], 1, "", f"Couldn't write .gitignore: {e}", time.monotonic() - start)
 
 
 BACKUP_NS = "refs/gitly/backup"
