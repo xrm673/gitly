@@ -60,6 +60,21 @@ a risk level. You see the plan and confirm it before anything runs.
 | careful | `pull`, `reset --soft`, `branch --delete` | Enter runs it, marked yellow |
 | risky | `reset --hard`, `push --force`, `clean` | You type `yes`; gitly saves a backup first |
 
+**Branch map.** Press `m` (or choose **Branch map**) to see your branches as a
+simple picture: one row per branch, left = older, right = newer, starting from
+the save it grew out of. It shows where you are, your unsaved changes, which
+saves are only on GitHub (hollow dots) or not uploaded yet, and branches that
+were already combined into main. It's a simplified view, not a full commit
+graph: each branch shows its last few saves of its own. For now the map is
+read-only; acting on branches directly from the map is next. See
+`gitly/graph.py`.
+
+```
+  main          ●──●──●─────●──◆      ↑4 not uploaded
+▶ payments            │     ╰──●──◉   you are here · ✎ 2 unsaved files
+  old-idea            ╰──●            not on GitHub yet
+```
+
 **Pre-save check.** Before **Save my work**, gitly looks at what the save would
 include and warns about:
 
@@ -133,6 +148,7 @@ Override the folder with `GITLY_LOG_DIR`.
 | `gitly/git.py` | Runs the real `git` CLI; parses status; backups |
 | `gitly/actions.py` | The no-AI menu plans |
 | `gitly/rescue.py` | Error pattern → explanation + fixes |
+| `gitly/graph.py` | Branch map: lanes per branch, layout, rendering |
 | `gitly/precheck.py` | Pre-save check: findings + the "leave these out" plan |
 | `gitly/secretscan.py` | Secret file names and API key patterns |
 | `gitly/safety.py` | Risk levels and blocked commands |

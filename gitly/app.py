@@ -10,12 +10,12 @@ from rich.markup import escape
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import ModalScreen
+from textual.containers import Horizontal, ScrollableContainer, Vertical, VerticalScroll
+from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Footer, Input, LoadingIndicator, OptionList, Static
 from textual.widgets.option_list import Option
 
-from . import actions, ai, git, precheck, rescue, safety
+from . import actions, ai, git, graph, precheck, rescue, safety
 from .plan import Plan
 from .studylog import StudyLog
 
@@ -240,6 +240,47 @@ class ThinkingScreen(ModalScreen):
             yield LoadingIndicator()
 
 
+class MapScreen(Screen):
+    """The branch map (read-only for now)."""
+
+    BINDINGS = [
+        Binding("escape,q,m", "dismiss(None)", "Back"),
+        Binding("r", "refresh_map", "Refresh"),
+    ]
+    CSS = """
+    MapScreen { background: $surface; }
+    #map-title { padding: 1 2 0 2; height: auto; }
+    #map-wrap { height: 1fr; margin: 1 2; border: round $accent; padding: 1 1; }
+    #map { width: auto; height: auto; }
+    #map-legend { padding: 0 2 1 2; height: auto; }
+    """
+
+    def __init__(self, cwd: str):
+        super().__init__()
+        self.cwd = cwd
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="map-title")
+        with ScrollableContainer(id="map-wrap"):
+            yield Static(id="map")
+        yield Static(graph.LEGEND, id="map-legend")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#map-wrap").border_title = "Branch map"
+        self.action_refresh_map()
+
+    def action_refresh_map(self) -> None:
+        s = git.state(self.cwd)
+        title = self.query_one("#map-title", Static)
+        if s is None:
+            title.update("This folder isn't a git project yet.")
+            return
+        g = graph.build(s)
+        title.update(f"[b]Your branches[/]  [dim]{escape(s.root)}[/]\n{s.summary()}")
+        self.query_one("#map", Static).update(graph.render(g, s))
+
+
 # ----------------------------------------------------------------- main app
 
 class Gitly(App):
@@ -271,6 +312,7 @@ class Gitly(App):
     """
     BINDINGS = [
         Binding("question_mark", "ask", "Ask in plain English"),
+        Binding("m", "map", "Branch map"),
         Binding("r", "refresh", "Refresh"),
         Binding("q", "quit", "Quit"),
     ]
@@ -376,6 +418,7 @@ class Gitly(App):
             *([("explain", "What did I change?")] if s.dirty else []),
             ("upload", "Upload to GitHub" + up_hint),
             ("pull", "Get latest" + pull_hint),
+            ("map", "Branch map  [dim]m[/]"),
             ("branches", "Branches…"),
             ("undo", "Undo…"),
             ("history", "History"),
@@ -408,6 +451,10 @@ class Gitly(App):
     def action_ask(self) -> None:
         if self.screen is self.screen_stack[0]:
             self.handle("ask")
+
+    def action_map(self) -> None:
+        if self.screen is self.screen_stack[0] and self.repo is not None:
+            self.handle("map")
 
     def action_refresh(self) -> None:
         self.refresh_state(keep_highlight=True)
@@ -461,6 +508,8 @@ class Gitly(App):
                         else actions.save_work(s, msg))
         elif key == "explain":
             await self.explain_flow(s)
+        elif key == "map":
+            await self.push_screen_wait(MapScreen(self.cwd))
         elif key == "upload":
             plan = actions.upload(s)
         elif key == "pull":

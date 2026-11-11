@@ -1,0 +1,151 @@
+"""Branch map: lanes, ownership of shared commits, and the rendered picture."""
+
+import itertools
+import os
+
+from rich.text import Text
+
+from gitly import git, graph
+
+from conftest import sh
+
+
+_clock = itertools.count(2_000_000_000, 60)
+
+
+def commit(repo, name):
+    """Commit with a distinct, increasing timestamp (real repos never tie)."""
+    (repo / f"{name}.txt").write_text(name)
+    sh(repo, "add", "-A")
+    when = f"@{next(_clock)} +0000"
+    os.environ["GIT_COMMITTER_DATE"] = os.environ["GIT_AUTHOR_DATE"] = when
+    try:
+        sh(repo, "commit", "-qm", name)
+    finally:
+        del os.environ["GIT_COMMITTER_DATE"], os.environ["GIT_AUTHOR_DATE"]
+
+
+def picture(repo):
+    s = git.state(repo)
+    g = graph.build(s)
+    return g, Text.from_markup(graph.render(g, s)).plain.splitlines()
+
+
+def lane(g, name):
+    return next(l for l in g.lanes if l.name == name)
+
+
+def test_single_branch(repo):
+    commit(repo, "second")
+    g, lines = picture(repo)
+    assert [l.name for l in g.lanes] == ["main"]
+    assert [c.subject for c in lane(g, "main").commits] == ["first", "second"]
+    [line] = lines
+    assert line.startswith("▶ main") and "●──◉" in line and "you are here" in line
+    assert "GitHub" not in line  # no remote: don't talk about GitHub
+
+
+def test_no_commits_yet(tmp_path):
+    sh(tmp_path, "init", "-q", "-b", "main")
+    _, lines = picture(tmp_path)
+    assert "No saves yet" in lines[0]
+
+
+def test_branch_grows_from_trunk(repo):
+    commit(repo, "second")
+    sh(repo, "switch", "-qc", "login")
+    commit(repo, "login form")
+    sh(repo, "switch", "-q", "main")
+    commit(repo, "fix footer")
+    g, lines = picture(repo)
+    login = lane(g, "login")
+    assert [c.subject for c in login.commits] == ["login form"]
+    assert g.commit(login.fork).subject == "second"
+    main_line, login_line = lines
+    assert main_line.startswith("▶ main") and "you are here" in main_line
+    # login's row starts under the commit it grew out of, and its commit sits left
+    # of "fix footer" because it's older.
+    assert login_line.index("╰") == main_line.index("●", main_line.index("●") + 1)
+    assert login_line.index("●") < main_line.index("◉")
+
+
+def test_shared_commits_belong_to_the_older_branch(repo):
+    sh(repo, "switch", "-qc", "payments")
+    commit(repo, "cart")
+    sh(repo, "switch", "-qc", "coupons")  # current branch, nothing of its own yet
+    g, lines = picture(repo)
+    assert [c.subject for c in lane(g, "payments").commits] == ["cart"]
+    coupons = lane(g, "coupons")
+    assert coupons.commits == [] and g.commit(coupons.fork).subject == "cart"
+    assert [l.name for l in g.lanes] == ["main", "coupons", "payments"]  # current branch first
+    assert "no saves of its own yet" in lines[1] and "you are here" in lines[1]
+
+
+def test_merged_branch(repo):
+    sh(repo, "switch", "-qc", "login")
+    commit(repo, "login form")
+    sh(repo, "switch", "-q", "main")
+    commit(repo, "other work")
+    sh(repo, "merge", "-q", "--no-edit", "login")
+    g, lines = picture(repo)
+    assert lane(g, "main").commits[-1].is_merge
+    assert lane(g, "login").merged
+    assert "◆" in lines[0] or "◉" in lines[0]
+    assert "already combined into main" in lines[1]
+
+
+def test_unsaved_changes_hang_off_you_are_here(repo):
+    (repo / "a.txt").write_text("edited\n")
+    (repo / "new.txt").write_text("x")
+    _, lines = picture(repo)
+    assert "✎ 2 unsaved files" in lines[0]
+
+
+def test_long_history_is_cut_with_marker(repo):
+    for i in range(12):
+        commit(repo, f"c{i}")
+    g, lines = picture(repo)
+    assert len(lane(g, "main").commits) == graph.TRUNK_COMMITS and lane(g, "main").truncated
+    assert "┄" in lines[0]
+
+
+def test_detached_head(repo):
+    commit(repo, "second")
+    sh(repo, "switch", "-q", "--detach", "HEAD~1")
+    commit(repo, "experiment")
+    g, lines = picture(repo)
+    d = lane(g, "(no branch)")
+    assert [c.subject for c in d.commits] == ["experiment"] and d.current
+    assert "old save, not on a branch" in lines[-1] and "you are here" in lines[-1]
+
+
+def test_github_status(remote_pair):
+    repo, other = remote_pair
+    commit(other, "teammate")
+    sh(other, "push", "-q")
+    sh(repo, "fetch", "-q")
+    g, lines = picture(repo)
+    main = lane(g, "main")
+    assert main.commits[-1].remote_only and main.commits[-1].subject == "teammate"
+    assert "○" in lines[0] and "↓1 on GitHub only" in lines[0]
+
+    commit(repo, "mine")  # now both sides have new commits
+    g, lines = picture(repo)
+    assert [l.name for l in g.lanes] == ["main", "main on GitHub"]
+    assert "↑1 not uploaded" in lines[0] and "○" in lines[1]
+
+
+def test_not_uploaded_branch(remote_pair):
+    repo, _ = remote_pair
+    sh(repo, "switch", "-qc", "draft")
+    commit(repo, "wip")
+    _, lines = picture(repo)
+    assert "in sync with GitHub" in lines[0] and "not on GitHub yet" in lines[1]
+
+
+def test_parents_left_of_children():
+    a = graph.Commit("a", [], 300, "a")  # clock skew: parent "newer" than child
+    b = graph.Commit("b", ["a"], 100, "b")
+    g = graph.Graph("main", [graph.Lane("main", "trunk", [a, b])], "b")
+    col = graph.columns(g)
+    assert col["a"] < col["b"]

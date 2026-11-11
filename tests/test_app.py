@@ -242,3 +242,20 @@ async def test_precheck_cancel_saves_nothing(repo):
         assert app.screen is app.screen_stack[0]
     assert sh(repo, "log", "--format=%s").splitlines() == ["first"]
     assert not (repo / ".gitignore").exists()
+
+
+async def test_branch_map_opens_and_closes(repo):
+    from gitly.app import MapScreen
+
+    sh(repo, "switch", "-qc", "login")
+    (repo / "l.txt").write_text("x"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "login form")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("m")
+        await pilot.pause()
+        assert isinstance(app.screen, MapScreen)
+        text = str(app.screen.query_one("#map").render())
+        assert "login" in text and "you are here" in text
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.screen is app.screen_stack[0]
