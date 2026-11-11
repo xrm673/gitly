@@ -181,11 +181,36 @@ def test_render_highlights_selection(repo):
     s = git.state(repo)
     g = graph.build(s)
     x = graph.positions(g)[0][0][0]
-    assert "on bright_yellow" in graph.render(g, s, selected=(0, x))
-    assert "on bright_yellow" not in graph.render(g, s)
+    assert "on yellow" in graph.render(g, s, selected=(0, x))
+    assert "on yellow" not in graph.render(g, s)
 
 
 def test_ago():
     assert graph.ago(1000, now=1000) == "just now"
     assert graph.ago(1000, now=1000 + 3 * 3600) == "3 hours ago"
     assert graph.ago(1000, now=1000 + 86400) == "1 day ago"
+
+
+def test_merge_and_undo_previews(repo):
+    commit(repo, "second")
+    sh(repo, "switch", "-qc", "login")
+    commit(repo, "login form")
+    sh(repo, "switch", "-q", "main")
+    s = git.state(repo)
+    g = graph.build(s)
+
+    merged = graph.after_merge(g, "login", "main")
+    main = lane(merged, "main")
+    assert main.commits[-1].is_merge and main.commits[-1].parents == [lane(g, "main").tip, lane(g, "login").tip]
+    assert merged.head == "(merge)" and "combined into main" in lane(merged, "login").badge
+
+    from_login = graph.after_merge(graph.after_switch(g, "login"), "login", "main")
+    assert lane(from_login, "main").current  # you end up on the receiving branch
+
+    reverted = graph.after_revert(g, "second")
+    assert lane(reverted, "main").commits[-1].subject == "Undo “second”"
+
+    un = graph.after_uncommit(g)
+    assert [c.subject for c in lane(un, "main").commits] == ["first"]
+    assert un.head == lane(g, "main").commits[0].sha
+    assert lane(g, "main").commits[-1].subject == "second"  # original untouched

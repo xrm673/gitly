@@ -72,12 +72,22 @@ map says what it is and which keys apply.
 
 - `n` starts a new branch from the selected save.
 - `Enter` switches to the selected branch.
+- `Space` picks up a branch; move to another branch's row and press `Enter` to
+  combine it in (`git merge --no-ff`, so there's always one save to undo).
+  Before you confirm, gitly predicts conflicts with `git merge-tree` (git 2.38+)
+  without touching your files.
+- `u` undoes the selected save. Your latest save, if it isn't on GitHub yet,
+  can be un-saved (`reset --soft`: its changes become unsaved again). Anything
+  else gets a new save that reverses it (`revert`); a merge uses `revert -m 1`,
+  with a warning that merging the same branch again won't bring the changes
+  back by itself.
 
 Every map action shows a **Now / After** picture next to the exact commands
 before anything runs. If you have unsaved changes, gitly checks whether they
-can come along (git carries them unless the other branch has a different
-version of the same file). If they're in the way, it offers to save them first,
-with the usual pre-save check and AI description.
+are in the way (the other branch, the incoming work, or the undo changes the
+same file). If they are, it offers to save them first, with the usual pre-save
+check and AI description. If a merge or undo stops on conflicts, the main
+screen offers to finish or cancel it.
 
 **Pre-save check.** Before **Save my work**, gitly looks at what the save would
 include and warns about:

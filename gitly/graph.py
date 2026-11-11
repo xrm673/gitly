@@ -316,6 +316,44 @@ def after_save(g: Graph, message: str) -> Graph:
     return out
 
 
+def after_merge(g: Graph, source: str, target: str) -> Graph:
+    """The graph once `source` is combined into `target` (always a merge commit) and you're on target."""
+    out = after_switch(g, target)
+    into = next((l for l in out.lanes if l.is_branch and l.name == target), None)
+    src = next((l for l in out.lanes if l.is_branch and l.name == source), None)
+    if into is None or src is None or into.tip is None:
+        return out
+    new = Commit("(merge)", [into.tip, src.tip or ""], int(time.time()), f"Combine {source} into {target}")
+    if not into.commits:
+        into.fork = into.fork or into.tip
+    into.commits.append(new)
+    into.tip = out.head = new.sha
+    src.badge = f"[dim]combined into {escape(target)}[/]"
+    into.badge = "[green]new combined save[/]"
+    return out
+
+
+def after_revert(g: Graph, subject: str) -> Graph:
+    """The graph once a save that reverses `subject` is added where you are."""
+    out = after_save(g, f"Undo “{subject}”")
+    lane = next((l for l in out.lanes if l.current), None)
+    if lane is not None:
+        lane.badge = "[green]new save that undoes it[/]"
+    return out
+
+
+def after_uncommit(g: Graph) -> Graph:
+    """The graph once your latest save is un-saved (its changes become unsaved again)."""
+    out = copy.deepcopy(g)
+    lane = next((l for l in out.lanes if l.current), None)
+    if lane is None or not lane.commits or lane.commits[-1].sha != out.head:
+        return out
+    gone = lane.commits.pop()
+    out.head = lane.tip = gone.parents[0] if gone.parents else None
+    lane.badge = "[green]latest save removed[/]"
+    return out
+
+
 # ----------------------------------------------------------------- drawing
 
 def lane_color_for(lane: Lane) -> str:
@@ -372,11 +410,12 @@ def _note(lane: Lane, g: Graph, s: RepoState, unsaved: int, compact: bool) -> st
 
 
 def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
-           compact: bool = False, unsaved: int | None = None) -> str:
+           compact: bool = False, unsaved: int | None = None, held: str | None = None) -> str:
     """The map as Rich markup, one line per lane.
 
     selected: (lane index, column) to highlight. compact: only mark where you
     are (for previews). unsaved: override the unsaved-file count shown.
+    held: branch picked up to combine into another (its label is highlighted).
     """
     if not g.lanes:
         return "[dim]No saves yet. Use “Save my work” to make your first one.[/]"
@@ -421,7 +460,10 @@ def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
         name = lane.name if len(lane.name) <= width - 2 else lane.name[: width - 3] + "…"
         label = ("▶ " if lane.current else "  ") + name
         bold = lane.current or (selected is not None and selected[0] == r)
-        label = f"[b]{escape(label):<{width}}[/]" if bold else f"{escape(label):<{width}}"
+        if held is not None and lane.is_branch and lane.name == held:
+            label = f"[b black on yellow]{escape(label):<{width}}[/]"
+        else:
+            label = f"[b]{escape(label):<{width}}[/]" if bold else f"{escape(label):<{width}}"
         cells = []
         remote = {c.sha for c in lane.commits if c.remote_only}
         for x in range(ncols):
@@ -431,7 +473,7 @@ def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
             if ch == "◉":
                 style = f"b reverse {colr}"
             if selected == (r, x):
-                style = "b black on bright_yellow"
+                style = "b black on yellow"
             cells.append(f"[{style}]{ch}[/][{'dim' if lane.kind == 'remote' else colr}]{ln}[/]"
                          if ch.strip() or ln.strip() else ch + ln)
         line = (label + "".join(cells)).rstrip()

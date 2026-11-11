@@ -115,3 +115,40 @@ def test_unsaved_in_the_way(repo):
 def test_valid_branch_name(repo):
     assert git.valid_branch_name(repo, "dark-mode")
     assert not git.valid_branch_name(repo, "bad..name")
+
+
+def _branch_with(repo, name, path, text, msg):
+    sh(repo, "switch", "-qc", name)
+    (repo / path).write_text(text)
+    sh(repo, "add", "."); sh(repo, "commit", "-qm", msg)
+    sh(repo, "switch", "-q", "main")
+
+
+def test_predict_merge(repo):
+    _branch_with(repo, "clean", "c.txt", "c\n", "clean change")
+    _branch_with(repo, "clash", "a.txt", "theirs\n", "their a")
+    (repo / "a.txt").write_text("ours\n"); sh(repo, "commit", "-qam", "our a")
+    assert git.predict_merge(repo, "main", "clean") == ("clean", [])
+    assert git.predict_merge(repo, "main", "clash") == ("conflict", ["a.txt"])
+    assert sh(repo, "status", "--porcelain") == ""  # touched nothing
+
+
+def test_commit_helpers(repo):
+    _branch_with(repo, "login", "l.txt", "l\n", "login")
+    sh(repo, "merge", "-q", "--no-ff", "--no-edit", "login")
+    assert git.files_in_commit(repo, "HEAD") == {"l.txt"}  # merge: compared with first parent
+    assert git.files_in_commit(repo, "HEAD~1") == {"a.txt"}  # root commit
+    assert git.is_ancestor(repo, "login", "main") and not git.is_ancestor(repo, "main", "login")
+    assert git.files_changed(repo, "HEAD~1", "HEAD") == {"l.txt"}
+
+
+def test_revert_in_progress_is_detected(repo):
+    (repo / "a.txt").write_text("two\n"); sh(repo, "commit", "-qam", "two")
+    (repo / "a.txt").write_text("three\n"); sh(repo, "commit", "-qam", "three")
+    import subprocess
+    subprocess.run(["git", "revert", "--no-edit", "HEAD~1"], cwd=repo, capture_output=True)
+    s = git.state(repo)
+    assert s.reverting and s.conflicts == ["a.txt"]
+    assert "undoing a save" in s.summary()
+    from gitly import actions
+    assert actions.abort_merge(s).steps[0].args == ["revert", "--abort"]

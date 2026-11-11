@@ -364,3 +364,146 @@ async def test_map_rejects_bad_names_and_remote_rows(repo):
         await wait_for(pilot, MapScreen)
         await app.workers.wait_for_complete()
     assert sh(repo, "branch", "--format=%(refname:short)").split() == ["main"]
+
+
+def _login_branch(repo, path="l.txt", text="l\n"):
+    sh(repo, "switch", "-qc", "login")
+    (repo / path).write_text(text); sh(repo, "add", "."); sh(repo, "commit", "-qm", "login form")
+    sh(repo, "switch", "-q", "main")
+
+
+async def _open_map(pilot):
+    from gitly.app import MapScreen
+    await pilot.press("m")
+    return await wait_for(pilot, MapScreen)
+
+
+async def _run_plan_and_return(pilot):
+    from gitly.app import MapScreen
+    await pilot.press("enter")
+    await wait_for(pilot, MapScreen)
+    await pilot.app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+async def test_map_combine_branch(repo):
+    _login_branch(repo)
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open_map(pilot)
+        await pilot.press("down", "space")
+        assert screen.held == "login"
+        assert "Carrying login" in str(screen.query_one("#map-detail").render())
+        await pilot.press("up", "enter")
+        plan_screen = await wait_for(pilot, PlanScreen)
+        assert [st.args for st in plan_screen.plan.steps] == [["merge", "--no-ff", "--no-edit", "login"]]
+        assert "No conflicts expected" in plan_screen.plan.note
+        assert "new combined save" in str(plan_screen.query_one(".preview").render())
+        await _run_plan_and_return(pilot)
+        assert screen.held is None
+    assert sh(repo, "log", "-1", "--format=%P", "main").count(" ") == 1  # a merge commit
+    assert (repo / "l.txt").exists()
+
+
+async def test_map_combine_from_other_branch_switches_first(repo):
+    _login_branch(repo)
+    sh(repo, "switch", "-q", "login")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open_map(pilot)
+        assert screen.selected()[0].name == "login"
+        await pilot.press("space", "up", "enter")
+        plan_screen = await wait_for(pilot, PlanScreen)
+        assert [st.args[0] for st in plan_screen.plan.steps] == ["switch", "merge"]
+        await _run_plan_and_return(pilot)
+    assert sh(repo, "branch", "--show-current").strip() == "main"
+
+
+async def test_map_combine_predicts_conflict(repo):
+    _login_branch(repo, "a.txt", "login version\n")
+    (repo / "a.txt").write_text("main version\n"); sh(repo, "commit", "-qam", "main edit")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _open_map(pilot)
+        await pilot.press("down", "space", "up", "enter")
+        plan_screen = await wait_for(pilot, PlanScreen)
+        assert "a.txt" in plan_screen.plan.note and "Both branches changed" in plan_screen.plan.note
+        await pilot.press("escape")
+        await app.workers.wait_for_complete()
+    assert sh(repo, "status", "--porcelain") == ""
+
+
+async def test_map_esc_puts_branch_down(repo):
+    from gitly.app import MapScreen
+    _login_branch(repo)
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open_map(pilot)
+        await pilot.press("down", "space", "escape")
+        await pilot.pause()
+        assert screen.held is None and isinstance(app.screen, MapScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.screen is app.screen_stack[0]
+
+
+async def test_map_undo_latest_unpushed_save(repo):
+    from gitly.app import ChooseScreen
+    (repo / "b.txt").write_text("b\n"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "add b")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _open_map(pilot)
+        await pilot.press("u")
+        await wait_for(pilot, ChooseScreen)
+        await pilot.press("enter")  # un-save (recommended)
+        plan_screen = await wait_for(pilot, PlanScreen)
+        assert [st.args for st in plan_screen.plan.steps] == [["reset", "--soft", "HEAD~1"]]
+        assert "1 unsaved file" in str(plan_screen.query_one(".preview").render())
+        await _run_plan_and_return(pilot)
+    assert sh(repo, "log", "--format=%s").splitlines() == ["first"]
+    assert (repo / "b.txt").read_text() == "b\n"  # nothing lost
+
+
+async def test_map_undo_merge_uses_revert_m1(repo):
+    _login_branch(repo)
+    sh(repo, "merge", "-q", "--no-ff", "--no-edit", "login")
+    (repo / "z.txt").write_text("unrelated\n"); sh(repo, "add", "z.txt")  # staged, unrelated
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _open_map(pilot)
+        await pilot.press("u")  # HEAD is the merge: no choice, straight to the plan
+        plan_screen = await wait_for(pilot, PlanScreen)
+        steps = [st.args for st in plan_screen.plan.steps]
+        assert steps[0] == ["restore", "--staged", "."]
+        assert steps[1][:4] == ["revert", "--no-edit", "-m", "1"]
+        assert "merging the same branch again" in plan_screen.plan.note
+        await _run_plan_and_return(pilot)
+    assert not (repo / "l.txt").exists()
+    assert sh(repo, "log", "-1", "--format=%s").startswith("Revert")
+    assert (repo / "z.txt").read_text() == "unrelated\n"
+
+
+async def test_map_undo_older_save_reverts(repo):
+    (repo / "b.txt").write_text("b\n"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "add b")
+    (repo / "c.txt").write_text("c\n"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "add c")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _open_map(pilot)
+        await pilot.press("left", "u")
+        plan_screen = await wait_for(pilot, PlanScreen)
+        assert plan_screen.plan.steps[0].args[:2] == ["revert", "--no-edit"]
+        assert "Later saves stay as they are" in plan_screen.plan.note
+        await _run_plan_and_return(pilot)
+    assert not (repo / "b.txt").exists() and (repo / "c.txt").exists()
+
+
+async def test_map_undo_refuses_other_branch(repo):
+    _login_branch(repo)
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _open_map(pilot)
+        await pilot.press("down", "u")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        assert not isinstance(app.screen, PlanScreen)
+    assert sh(repo, "log", "-1", "--format=%s", "login").strip() == "login form"

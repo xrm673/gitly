@@ -89,6 +89,7 @@ class RepoState:
     conflicts: list[str] = field(default_factory=list)
     merging: bool = False
     rebasing: bool = False
+    reverting: bool = False
     remotes: list[str] = field(default_factory=list)
     # Paths (or folders ending in "/") the user chose to leave out of the next save.
     left_out: list[str] = field(default_factory=list)
@@ -112,6 +113,8 @@ class RepoState:
             parts.append("You're in the middle of combining branches (merge).")
         elif self.rebasing:
             parts.append("You're in the middle of a rebase.")
+        elif self.reverting:
+            parts.append("You're in the middle of undoing a save (revert).")
         if self.detached:
             parts.append(f"You're not on a branch (detached at {self.head_sha[:7]}).")
         elif self.branch:
@@ -143,7 +146,8 @@ class RepoState:
             f"head: {self.head_sha or '(no commits yet)'}",
             f"upstream: {self.upstream or '(none)'} ahead={self.ahead} behind={self.behind}",
             f"remotes: {', '.join(self.remotes) or '(none)'}",
-            f"merge in progress: {self.merging}; rebase in progress: {self.rebasing}",
+            f"merge in progress: {self.merging}; rebase in progress: {self.rebasing}; "
+            f"revert in progress: {self.reverting}",
         ]
         for c in self.changes[:50]:
             lines.append(f"  {'staged' if c.staged else 'unstaged'} {c.status}: {c.path}")
@@ -223,6 +227,7 @@ def state(cwd: str | Path) -> RepoState | None:
         conflicts=s["conflicts"],
         merging=(gitdir / "MERGE_HEAD").exists(),
         rebasing=(gitdir / "rebase-merge").exists() or (gitdir / "rebase-apply").exists(),
+        reverting=(gitdir / "REVERT_HEAD").exists(),
         remotes=remotes,
     )
 
@@ -232,17 +237,52 @@ def branches(cwd: str | Path) -> list[str]:
     return [b for b in r.stdout.splitlines() if b]
 
 
+def files_changed(root: str | Path, *revs: str) -> set[str]:
+    """Paths that differ between revisions, e.g. ("HEAD", "main") or ("main...login",)."""
+    r = run(["diff", "--name-only", "--no-renames", "-z", *revs, "--"], root)
+    return {p for p in r.stdout.split("\0") if p}
+
+
+def files_in_commit(root: str | Path, sha: str) -> set[str]:
+    """Paths a commit changed (for a merge: compared with its first parent)."""
+    r = run(["diff-tree", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z",
+             "-m", "--first-parent", "--root", sha], root)
+    return {p for p in r.stdout.split("\0") if p}
+
+
+def unsaved_paths(s: RepoState) -> set[str]:
+    return {c.path for c in s.changes} | set(s.untracked) | set(s.conflicts)
+
+
 def unsaved_in_the_way(s: RepoState, target: str) -> list[str]:
     """Unsaved files that are also different on `target`.
 
     Git carries unsaved changes along when you move to another commit, unless
     that commit has a different version of the same file. Then it refuses.
     """
-    unsaved = {c.path for c in s.changes} | set(s.untracked) | set(s.conflicts)
+    unsaved = unsaved_paths(s)
     if not unsaved or not s.head_sha:
         return []
-    r = run(["diff", "--name-only", "--no-renames", "-z", "HEAD", target, "--"], s.root)
-    return sorted(unsaved & set(r.stdout.split("\0")))
+    return sorted(unsaved & files_changed(s.root, "HEAD", target))
+
+
+def is_ancestor(root: str | Path, a: str, b: str) -> bool:
+    """Is commit `a` already part of `b`'s history?"""
+    return run(["merge-base", "--is-ancestor", a, b], root).ok
+
+
+def predict_merge(root: str | Path, target: str, source: str) -> tuple[str, list[str]]:
+    """Would merging `source` into `target` conflict? Touches no files.
+
+    Returns ("clean", []), ("conflict", [paths]) or ("unknown", []) when git is
+    too old for `merge-tree --write-tree` (needs 2.38).
+    """
+    r = run(["merge-tree", "--write-tree", "--name-only", "--no-messages", target, source], root)
+    if r.code == 0:
+        return "clean", []
+    if r.code == 1:
+        return "conflict", [p for p in r.stdout.splitlines()[1:] if p]
+    return "unknown", []
 
 
 def valid_branch_name(root: str | Path, name: str) -> bool:

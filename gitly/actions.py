@@ -79,6 +79,32 @@ def branch_steps(name: str, at: str | None, label: str, carrying: int) -> list[S
     return [Step(args, why)]
 
 
+def merge_steps(source: str, target: str, current: str | None) -> list[Step]:
+    steps = []
+    if current != target:
+        steps.append(Step(["switch", target], f"Move to '{target}', the branch receiving the work."))
+    steps.append(Step(["merge", "--no-ff", "--no-edit", source],
+                      f"Combine '{source}' into '{target}' as one new save. "
+                      f"'{source}' itself doesn't change, and you can undo the whole thing later."))
+    return steps
+
+
+def uncommit_steps() -> list[Step]:
+    return [Step(["reset", "--soft", "HEAD~1"],
+                 "Un-save your latest save. The changes in it go back to being unsaved, "
+                 "exactly as they were, so you can edit them or save again.")]
+
+
+def revert_steps(sha: str, subject: str, merge: bool) -> list[Step]:
+    if merge:
+        return [Step(["revert", "--no-edit", "-m", "1", sha[:12]],
+                     f"Add a new save that takes out everything “{subject}” brought in. "
+                     "“-m 1” means: keep the branch you merged into, drop what came from the other one.")]
+    return [Step(["revert", "--no-edit", sha[:12]],
+                 f"Add a new save that does the exact opposite of “{subject}”. "
+                 "The original stays in your history, so nothing is lost.")]
+
+
 def delete_branch(name: str) -> Plan:
     return Plan("Delete branch", [Step(
         ["branch", "--delete", name],
@@ -138,6 +164,8 @@ def finish_merge() -> Plan:
 def abort_merge(s: RepoState) -> Plan:
     if s.rebasing:
         return Plan("Cancel rebase", [Step(["rebase", "--abort"], "Go back to how things were before the rebase.")])
+    if s.reverting:
+        return Plan("Cancel undo", [Step(["revert", "--abort"], "Go back to how things were before the undo.")])
     return Plan("Cancel combining", [Step(["merge", "--abort"], "Go back to how things were before the pull/merge.")])
 
 

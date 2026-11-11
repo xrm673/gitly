@@ -16,7 +16,7 @@ from textual.widgets import Button, Footer, Input, LoadingIndicator, OptionList,
 from textual.widgets.option_list import Option
 
 from . import actions, ai, git, graph, precheck, rescue, safety
-from .plan import Plan
+from .plan import Plan, Step
 from .studylog import StudyLog
 
 RISK_BADGE = {
@@ -244,16 +244,23 @@ class ThinkingScreen(ModalScreen):
 
 
 class MapScreen(Screen):
-    """The branch map. Arrow keys pick a save; n and Enter act on it."""
+    """The branch map. Arrow keys pick a save; keys act on it.
+
+    n: new branch here · Enter: switch · Space then Enter: combine one branch
+    into another · u: undo a save.
+    """
 
     BINDINGS = [
-        Binding("escape,q,m", "dismiss(None)", "Back"),
+        Binding("escape", "back", "Back"),
+        Binding("q,m", "dismiss(None)", "Back", show=False),
         Binding("left", "move(0, -1)", "Move", show=False),
         Binding("right", "move(0, 1)", "Move", show=False),
         Binding("up", "move(-1, 0)", "Move", show=False),
         Binding("down", "move(1, 0)", "Move", show=False),
         Binding("n", "new_branch", "New branch from here"),
-        Binding("enter", "switch", "Switch to this branch"),
+        Binding("enter", "enter", "Switch / drop"),
+        Binding("space", "pick_up", "Combine…"),
+        Binding("u", "undo", "Undo this save"),
         Binding("r", "refresh_map", "Refresh"),
     ]
     CSS = """
@@ -272,6 +279,7 @@ class MapScreen(Screen):
         self.g: graph.Graph | None = None
         self.cells: list[list[tuple[int, str]]] = []
         self.sel: tuple[int, int] | None = None  # (lane index, index into its cells)
+        self.held: str | None = None  # branch picked up with Space, to combine into another
 
     def compose(self) -> ComposeResult:
         yield Static(id="map-title")
@@ -323,7 +331,7 @@ class MapScreen(Screen):
         if self.g is None or self.s is None:
             return
         cell = (self.sel[0], self.cells[self.sel[0]][self.sel[1]][0]) if self.sel else None
-        self.query_one("#map", Static).update(graph.render(self.g, self.s, selected=cell))
+        self.query_one("#map", Static).update(graph.render(self.g, self.s, selected=cell, held=self.held))
         self.query_one("#map-detail", Static).update(self._detail())
 
     def _detail(self) -> str:
@@ -331,6 +339,11 @@ class MapScreen(Screen):
         if sel is None:
             return "[dim]Nothing to select yet.[/]"
         lane, sha = sel
+        if self.held:
+            target = (f"Enter brings it into [b]{escape(lane.name)}[/]"
+                      if lane.is_branch and lane.name != self.held else "move to another branch's row")
+            return (f"[b black on yellow] Carrying {escape(self.held)} [/]  ↑ ↓ {target}\n"
+                    "[b]enter[/] combine here   [b]esc[/] put it down")
         c = self.g.commit(sha)
         if lane.commits:
             where = "only on GitHub" if c and c.remote_only else f"on {escape(lane.name)}"
@@ -342,6 +355,10 @@ class MapScreen(Screen):
         keys = ["[b]n[/] new branch from here"]
         if lane.is_branch and not lane.current:
             keys.append(f"[b]enter[/] switch to {escape(lane.name)}")
+        if lane.is_branch:
+            keys.append(f"[b]space[/] combine {escape(lane.name)} into…")
+        if c and not c.remote_only:
+            keys.append("[b]u[/] undo this save")
         keys += ["[b]← ↑ ↓ →[/] pick a save", "[b]esc[/] back"]
         return head + "\n" + "   ".join(keys)
 
@@ -373,14 +390,16 @@ class MapScreen(Screen):
         s = self.s
         if s is None or self.selected() is None:
             return "Nothing to act on yet."
-        if s.conflicts or s.merging or s.rebasing:
+        if s.conflicts or s.merging or s.rebasing or s.reverting:
             return "Finish or cancel the merge in progress first (main screen)."
         return None
 
-    async def _make_room(self, target: str, where: str) -> tuple[bool, Plan | None]:
-        """Unsaved files that `target` also changes block the move. Returns (go on?, save plan)."""
+    async def _make_room(self, blocking: list[str], reason: str) -> tuple[bool, Plan | None]:
+        """Unsaved files in the way of an action. Offers to save them first.
+
+        reason completes "You changed <files>, and ...". Returns (go on?, save plan).
+        """
         s = self.s
-        blocking = await asyncio.to_thread(git.unsaved_in_the_way, s, target)
         if not blocking:
             return True, None
         shown = ", ".join(escape(b) for b in blocking[:5]) + (" …" if len(blocking) > 5 else "")
@@ -388,8 +407,8 @@ class MapScreen(Screen):
             "Your unsaved changes are in the way", [
                 ("save", "Save my changes first, then go  [dim](recommended)[/]"),
                 ("cancel", "Cancel"),
-            ], hint=(f"You changed [b]{shown}[/], and {where} has a different version. "
-                     "Git won't move without overwriting your edits. Saving them first keeps "
+            ], hint=(f"You changed [b]{shown}[/], and {escape(reason)}. "
+                     "Git won't go ahead without overwriting your edits. Saving them first keeps "
                      "them safe on the branch you're on now.")))
         self.app.log_.event("map_in_the_way", files=len(blocking), choice=choice or "cancel")
         if choice != "save":
@@ -423,7 +442,8 @@ class MapScreen(Screen):
             self.notify(f"'{name}' can't be a branch name. Try letters, numbers and dashes.",
                         severity="warning")
             return
-        ok, save = (True, None) if here else await self._make_room(sha, label)
+        blocking = [] if here else await asyncio.to_thread(git.unsaved_in_the_way, s, sha)
+        ok, save = await self._make_room(blocking, f"{label} has a different version")
         if not ok:
             return
         before = graph.after_save(g, save.steps[-1].args[-1]) if save else g
@@ -439,8 +459,156 @@ class MapScreen(Screen):
         await self.app.execute(plan)
         self.action_refresh_map()
 
+    def action_back(self) -> None:
+        if self.held:
+            self.held = None
+            self._draw()
+        else:
+            self.dismiss(None)
+
+    def action_enter(self) -> None:
+        if self.held:
+            self.combine()
+        else:
+            self.switch()
+
+    def action_pick_up(self) -> None:
+        if reason := self._busy_reason():
+            self.notify(reason, severity="warning")
+            return
+        lane, _ = self.selected()
+        if self.held == lane.name:
+            self.held = None
+        elif lane.kind == "remote":
+            self.notify("This row is GitHub's copy. Use “Get latest” on the main screen to bring it in.")
+            return
+        elif not lane.is_branch:
+            self.notify("Only branches can be combined. Press n to make a branch here first.")
+            return
+        else:
+            self.held = lane.name
+        self._draw()
+
+    def _unstage_first(self, save: Plan | None) -> list:
+        """Git won't merge or revert while some files are marked for saving and others aren't."""
+        if save is None and self.s.staged and self.s.head_sha:
+            return [Step(["restore", "--staged", "."],
+                                 "Unmark files that were half-marked for saving. Your edits stay exactly "
+                                 "as they are; git just won't do this while some files are marked.")]
+        return []
+
     @work(exclusive=True, group="map")
-    async def action_switch(self) -> None:
+    async def combine(self) -> None:
+        source, (lane, _) = self.held, self.selected()
+        if not lane.is_branch or lane.name == source:
+            self.notify("Move to the row of the branch that should receive it, then press Enter.")
+            return
+        self.held = None
+        self._draw()
+        if reason := self._busy_reason():
+            self.notify(reason, severity="warning")
+            return
+        s, g, target = self.s, self.g, lane.name
+        if await asyncio.to_thread(git.is_ancestor, s.root, source, target):
+            self.notify(f"Everything in {source} is already in {target}. Nothing to combine.")
+            return
+        unsaved = git.unsaved_paths(s)
+        incoming = await asyncio.to_thread(git.files_changed, s.root, f"{target}...{source}")
+        moving = (await asyncio.to_thread(git.files_changed, s.root, "HEAD", target)
+                  if s.branch != target else set())
+        blocking = sorted(unsaved & (incoming | moving))
+        them = "it" if len(blocking) == 1 else "them"
+        ok, save = await self._make_room(blocking, f"the work coming from '{source}' changes {them} too")
+        if not ok:
+            return
+        status, files = await asyncio.to_thread(git.predict_merge, s.root, target, source)
+        if status == "clean":
+            note = "[green]✓ No conflicts expected.[/] gitly checked this without touching your files."
+        elif status == "conflict":
+            note = (f"[yellow]⚠ Both branches changed {escape(', '.join(files[:5]))} in different ways.[/] "
+                    "Git will stop and mark the spots so you can pick what to keep, then choose "
+                    "“I fixed the conflicts, finish”. You can cancel the combining at any point.")
+        else:
+            note = "[dim]gitly couldn't check for conflicts ahead of time (needs git 2.38 or newer).[/]"
+        before = graph.after_save(g, save.steps[-1].args[-1]) if save else g
+        after = graph.after_merge(before, source, target)
+        carrying = 0 if save else self._unsaved()
+        plan = actions.from_map(
+            "Combine branches", self._unstage_first(save) + actions.merge_steps(source, target, s.branch),
+            summary=f"Bring the work from '{source}' into '{target}'.", note=note,
+            preview=(graph.render(g, s, compact=True),
+                     graph.render(after, s, compact=True, unsaved=carrying)),
+            save_first=save)
+        self.app.log_.event("map_action", action="merge", prediction=status, conflicts=len(files),
+                            save_first=save is not None)
+        await self.app.execute(plan)
+        self.action_refresh_map()
+
+    @work(exclusive=True, group="map")
+    async def action_undo(self) -> None:
+        if reason := self._busy_reason():
+            self.notify(reason, severity="warning")
+            return
+        lane, sha = self.selected()
+        s, g = self.s, self.g
+        c = g.commit(sha)
+        if c is None or c.remote_only:
+            self.notify("That save is only on GitHub. Use “Get latest” first.")
+            return
+        if not await asyncio.to_thread(git.is_ancestor, s.root, sha, "HEAD"):
+            self.notify(f"That save isn't part of the branch you're on. Switch to {lane.name} "
+                        "first (Enter), then undo it.")
+            return
+        is_head = sha == s.head_sha
+        pushed = bool(s.upstream) and await asyncio.to_thread(git.is_ancestor, s.root, sha, s.upstream)
+        method = "revert"
+        if is_head and not pushed and not c.is_merge and c.parents:
+            method = await self.app.push_screen_wait(ChooseScreen(f"Undo “{c.subject}”", [
+                ("uncommit", "Un-save it: its changes go back to being unsaved  [dim](recommended)[/]"),
+                ("revert", "Keep it, and add a new save that reverses it"),
+            ], hint="This save isn't on GitHub yet, so it can simply be un-saved. Nothing is lost either way."))
+            if method is None:
+                return
+        unsaved = git.unsaved_paths(s)
+        if method == "uncommit":
+            save, notes = None, []
+            steps = actions.uncommit_steps()
+            after = graph.after_uncommit(g)
+            unsaved_after = len(unsaved | await asyncio.to_thread(git.files_in_commit, s.root, sha))
+        else:
+            touched = await asyncio.to_thread(git.files_in_commit, s.root, sha)
+            blocking = sorted(unsaved & touched)
+            them = "it" if len(blocking) == 1 else "them"
+            ok, save = await self._make_room(blocking, f"undoing “{c.subject}” would change {them} too")
+            if not ok:
+                return
+            steps = self._unstage_first(save) + actions.revert_steps(sha, c.subject, c.is_merge)
+            notes = []
+            if pushed:
+                notes.append("This save is already on GitHub, so gitly adds an opposite save instead of "
+                             "erasing it. Erasing shared saves causes trouble for anyone who already has them.")
+            if c.is_merge:
+                notes.append("[yellow]Heads up:[/] after undoing a merge, merging the same branch again "
+                             "won't bring those changes back by itself, because git thinks they're already "
+                             "in. If you change your mind later, undo this undo instead.")
+            if not is_head:
+                notes.append("Later saves stay as they are; only this save's changes are reversed. If later "
+                             "saves built on it, git may ask you to sort out conflicts.")
+            before = graph.after_save(g, save.steps[-1].args[-1]) if save else g
+            after = graph.after_revert(before, c.subject)
+            unsaved_after = 0 if save else len(unsaved)
+        plan = actions.from_map(
+            "Undo a save", steps, summary=f"Undo “{c.subject}”.", note="\n\n".join(notes),
+            preview=(graph.render(g, s, compact=True),
+                     graph.render(after, s, compact=True, unsaved=unsaved_after)),
+            save_first=save)
+        self.app.log_.event("map_action", action="undo", method=method, merge=c.is_merge,
+                            pushed=pushed, head=is_head, save_first=save is not None)
+        await self.app.execute(plan)
+        self.action_refresh_map()
+
+    @work(exclusive=True, group="map")
+    async def switch(self) -> None:
         if reason := self._busy_reason():
             self.notify(reason, severity="warning")
             return
@@ -455,7 +623,8 @@ class MapScreen(Screen):
             self.notify(f"You're already on {lane.name}.")
             return
         s, g = self.s, self.g
-        ok, save = await self._make_room(lane.name, f"'{lane.name}'")
+        blocking = await asyncio.to_thread(git.unsaved_in_the_way, s, lane.name)
+        ok, save = await self._make_room(blocking, f"'{lane.name}' has a different version")
         if not ok:
             return
         before = graph.after_save(g, save.steps[-1].args[-1]) if save else g
@@ -572,7 +741,7 @@ class Gitly(App):
         if s.conflicts:
             warn = (f"⚠ {len(s.conflicts)} file(s) have conflicts. Edit them to keep the right "
                     "version (remove the <<<<<<< >>>>>>> markers), then choose “I fixed the conflicts”.")
-        elif s.merging or s.rebasing:
+        elif s.merging or s.rebasing or s.reverting:
             warn = "⚠ A merge/rebase is in progress. Finish it or cancel it below."
         elif s.detached:
             warn = ("⚠ You're looking at an old snapshot, not a branch. New commits here can get lost: "
@@ -595,7 +764,7 @@ class Gitly(App):
         files.update("\n".join(lines) if lines else "[dim]No unsaved changes.[/]")
 
         menu: list = []
-        if s.conflicts or s.merging or s.rebasing:
+        if s.conflicts or s.merging or s.rebasing or s.reverting:
             menu += [("finish_merge", "[b]I fixed the conflicts, finish[/]"),
                      ("abort_merge", "Cancel combining"), None]
         if s.detached:
