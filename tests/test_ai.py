@@ -111,3 +111,60 @@ def test_branch_name_skips_diff_when_clean(repo, monkeypatch):
     msgs = fake_client(monkeypatch, ai.BranchName(name="x", reason="kept"))
     ai.suggest_branch_name("x", git.state(repo), "where you are", [])
     assert "<changes>" not in msgs.calls[0]["messages"][0]["content"]
+
+
+def test_saved_key_used_when_no_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    assert not ai.available()
+    path = ai.save_key("  sk-ant-test\n")
+    assert path == tmp_path / "gitly" / "api_key"
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert ai.available() and ai.saved_key() == "sk-ant-test"
+
+    seen = {}
+    monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: seen.update(kw) or SimpleNamespace(
+        messages=FakeMessages(ai.CommitMessage(message="x"))))
+    ai._call("sys", "hi", ai.CommitMessage, 100)
+    assert seen["api_key"] == "sk-ant-test"
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-env")  # the environment wins
+    seen.clear()
+    ai._call("sys", "hi", ai.CommitMessage, 100)
+    assert "api_key" not in seen
+
+
+def test_rejected_saved_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    ai.save_key("sk-ant-bad")
+
+    def reject(**kw):
+        raise anthropic.AuthenticationError("bad", response=SimpleNamespace(
+            status_code=401, headers={}, request=None), body=None)
+
+    monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: SimpleNamespace(
+        messages=SimpleNamespace(parse=reject)))
+    with pytest.raises(ai.AIKeyRejected):
+        ai._call("sys", "hi", ai.CommitMessage, 100)
+
+
+def test_next_step_request(repo, monkeypatch):
+    (repo / "a.txt").write_text("edited\n")
+    out = ai.NextStep(action=" Save ", reason="One change.", message="Edit a", groups=[], branch="")
+    msgs = fake_client(monkeypatch, out)
+    step, tel = ai.suggest_next(git.state(repo), "<allowed_actions>\nsave\n</allowed_actions>", with_changes=True)
+    kw = msgs.calls[0]
+    assert step.action == "save" and kw["output_format"] is ai.NextStep and kw["system"] == ai.NEXT_SYSTEM
+    content = kw["messages"][0]["content"]
+    assert "+edited" in content and "<allowed_actions>" in content
+    ai.suggest_next(git.state(repo), "facts", with_changes=False)
+    assert "+edited" not in msgs.calls[1]["messages"][0]["content"]
+
+
+def test_next_step_schema_is_accepted_by_sdk():
+    from anthropic.lib._parse._transform import transform_schema
+    assert transform_schema(ai.NextStep.model_json_schema())["additionalProperties"] is False
+
+
+def test_default_model_is_sonnet():
+    import os
+    assert ai.MODEL == os.environ.get("GITLY_MODEL", "claude-sonnet-5-5")
