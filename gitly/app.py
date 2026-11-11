@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from pathlib import Path
 
 from rich.markup import escape
@@ -12,19 +13,29 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical, VerticalScroll
 from textual.screen import ModalScreen
+from textual.theme import Theme
 from textual.widgets import Button, Footer, Input, LoadingIndicator, OptionList, Static
 from textual.widgets.option_list import Option
 
-from . import actions, ai, git, graph, precheck, rescue, safety
+from . import actions, ai, git, graph, precheck, rescue, safety, suggest
 from .plan import Plan, Step
 from .studylog import StudyLog
 
 RISK_BADGE = {
-    safety.SAFE: "[b green]safe[/]",
-    safety.CAUTION: "[b yellow]careful[/]",
-    safety.DANGER: "[b red]risky[/]",
+    safety.SAFE: "[b $success]safe[/]",
+    safety.CAUTION: "[b $warning]careful[/]",
+    safety.DANGER: "[b $error]risky[/]",
 }
-STATUS_COLOR = {"new": "green", "deleted": "red", "renamed": "cyan", "conflict": "magenta"}
+STATUS_COLOR = {"new": "$success", "deleted": "$error", "renamed": "$secondary", "conflict": "#f9a8d4"}
+AI_COLOR = "#b69cff"  # everything the AI wrote or picked is marked with a ✦ in this color
+CMD = "b #e6e9f2 on #2a3042"  # a git command, shown as a little block
+
+THEME = Theme(
+    name="gitly", dark=True,
+    primary="#8b9cff", secondary="#7dd3fc", accent="#f5b85c",
+    success="#7bd88f", warning="#f5c26b", error="#ff7a85",
+    foreground="#d7dbe7", background="#0e1016", surface="#12151d", panel="#1b1f2b",
+)
 
 
 # ----------------------------------------------------------------- modal screens
@@ -90,7 +101,7 @@ class PlanScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         p = self.plan
         with Vertical(classes="dialog wide"):
-            src = {"ai": "  [dim](suggested by AI, check it)[/]", "rescue": ""}.get(p.source, "")
+            src = {"ai": f"  [{AI_COLOR}]✦[/] [dim]suggested by AI, check it[/]", "rescue": ""}.get(p.source, "")
             yield Static(f"[b]{escape(p.title)}[/]{src}", classes="dialog-title")
             with VerticalScroll(classes="plan-body"):
                 if p.note:
@@ -105,17 +116,17 @@ class PlanScreen(ModalScreen):
                 for i, st in enumerate(p.steps, 1):
                     cmd = escape(st.display)
                     badge = RISK_BADGE[st.risk]
-                    blocked = f"\n   [red]✗ blocked: {escape(st.blocked)}[/]" if st.blocked else ""
-                    yield Static(f"{i}. [b reverse] {cmd} [/]  {badge}\n   {escape(st.why)}{blocked}",
+                    blocked = f"\n   [$error]✗ blocked: {escape(st.blocked)}[/]" if st.blocked else ""
+                    yield Static(f"[dim]{i}.[/] [{CMD}] {cmd} [/]  {badge}\n   {escape(st.why)}{blocked}",
                                  classes="step")
             if p.blocked:
-                yield Static("[red]gitly won't run this plan because a step is blocked.[/]")
+                yield Static("[$error]gitly won't run this plan because a step is blocked.[/]")
                 yield Button("Close", id="cancel", variant="default")
             elif not p.steps:
                 yield Button("OK", id="cancel", variant="primary")
             else:
                 if p.risk == safety.DANGER:
-                    yield Static("[red]This can throw away work.[/] gitly will save a backup first "
+                    yield Static("[$error]This can throw away work.[/] gitly will save a backup first "
                                  "(Undo → Restore a backup).\nType [b]yes[/] and press Enter to run.")
                     yield Input(placeholder="yes", id="confirm")
                 with Horizontal(classes="buttons"):
@@ -157,7 +168,7 @@ class ProblemScreen(ModalScreen):
         d = self.diagnosis
         with Vertical(classes="dialog wide"):
             title = d.title if d else "That didn't work"
-            yield Static(f"[b red]✗[/] [b]{escape(title)}[/]", classes="dialog-title")
+            yield Static(f"[b $error]✗[/] [b]{escape(title)}[/]", classes="dialog-title")
             with VerticalScroll(classes="plan-body"):
                 if d:
                     yield Static(escape(d.explanation), classes="note")
@@ -196,7 +207,7 @@ class PrecheckScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         n = len(self.findings)
         with Vertical(classes="dialog wide"):
-            yield Static(f"[b yellow]⚠[/] [b]Check {'this' if n == 1 else 'these'} before saving[/]",
+            yield Static(f"[b $warning]⚠[/] [b]Check {'this' if n == 1 else 'these'} before saving[/]",
                          classes="dialog-title")
             with VerticalScroll(classes="plan-body"):
                 for f in self.findings:
@@ -265,12 +276,12 @@ class BranchMap(Vertical, can_focus=True):
         Binding("u", "undo", "Undo this save"),
     ]
     DEFAULT_CSS = """
-    BranchMap { border: round $panel; padding: 0 1; min-height: 7; }
+    BranchMap { border: round $panel-lighten-2; padding: 0 1; min-height: 7; }
     BranchMap:focus { border: round $accent; }
-    BranchMap #map-wrap { height: 1fr; scrollbar-size-horizontal: 1; }
+    BranchMap #map-wrap { height: 1fr; scrollbar-size-horizontal: 1;
+                          scrollbar-background: $background; scrollbar-color: $panel-lighten-2; }
     BranchMap #map { width: auto; height: auto; }
-    BranchMap #map-detail { height: 1; display: none; text-wrap: nowrap; text-overflow: ellipsis; }
-    BranchMap:focus #map-detail { display: block; }
+    BranchMap #map-detail { height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
     """
 
     def __init__(self, **kw):
@@ -281,6 +292,7 @@ class BranchMap(Vertical, can_focus=True):
         self.cells: list[list[tuple[int, str]]] = []
         self.sel: tuple[int, int] | None = None  # (lane index, index into its cells)
         self.held: str | None = None  # branch picked up with Space, to combine into another
+        self.ghost: graph.Ghost | None = None  # the suggested next step, drawn faintly
 
     def compose(self) -> ComposeResult:
         with ScrollableContainer(id="map-wrap"):
@@ -293,12 +305,19 @@ class BranchMap(Vertical, can_focus=True):
         self._titles()
 
     def _titles(self, focused: bool = False) -> None:
-        self.border_subtitle = (graph.LEGEND_SHORT if focused
-                                else "tab: pick a save to branch, switch, combine or undo")
+        self.border_subtitle = graph.LEGEND_SHORT
+
+    def set_ghost(self, ghost: graph.Ghost | None) -> None:
+        if ghost != self.ghost:
+            self.ghost = ghost
+            self._draw()
 
     def on_focus(self) -> None:
         self._titles(focused=True)
         self._draw(focused=True)
+
+    def on_resize(self) -> None:
+        self._draw()  # the notes after each row are cut to the width
 
     def on_blur(self) -> None:
         self.held = None
@@ -312,6 +331,7 @@ class BranchMap(Vertical, can_focus=True):
         self.s = s
         if s is None or s.head_sha is None:
             self.g, self.cells, self.sel, self._sig = None, [], None, None
+            self.query_one("#map-detail", Static).update("")
             self.query_one("#map", Static).update(
                 "[dim]Your branches will show up here after your first save.[/]" if s
                 else "[dim]Start tracking this folder to see branches here.[/]")
@@ -354,8 +374,12 @@ class BranchMap(Vertical, can_focus=True):
             return
         focused = self.has_focus if focused is None else focused
         cell = (self.sel[0], self.cells[self.sel[0]][self.sel[1]][0]) if self.sel and focused else None
-        self.query_one("#map", Static).update(graph.render(self.g, self.s, selected=cell, held=self.held))
-        self.query_one("#map-detail", Static).update(self._detail())
+        self.query_one("#map", Static).update(graph.render(
+            self.g, self.s, selected=cell, held=self.held, ghost=self.ghost,
+            max_width=self.query_one("#map-wrap").size.width or None))
+        self.query_one("#map-detail", Static).update(
+            self._detail() if focused else
+            "[b]Tab[/] [dim]pick a save, then branch from it, switch, combine or undo[/]")
 
     def _detail(self) -> str:
         sel = self.selected()
@@ -365,7 +389,7 @@ class BranchMap(Vertical, can_focus=True):
         if self.held:
             target = (f"Enter brings it into [b]{escape(lane.name)}[/]"
                       if lane.is_branch and lane.name != self.held else "move to another branch's row")
-            return (f"[b black on yellow] Carrying {escape(self.held)} [/]  ↑ ↓ {target} · "
+            return (f"[{graph.SELECTED}] Carrying {escape(self.held)} [/]  ↑ ↓ {target} · "
                     "esc puts it down")
         c = self.g.commit(sha)
         if lane.commits:
@@ -442,12 +466,15 @@ class BranchMap(Vertical, can_focus=True):
         if reason := self._busy_reason():
             self.notify(reason, severity="warning")
             return
-        lane, sha = self.selected()
+        await self.new_branch(self.selected()[1])
+
+    async def new_branch(self, sha: str, name: str | None = None) -> None:
+        """Start a branch at `sha`. Asks for the name unless one is given (an accepted suggestion)."""
         s, g = self.s, self.g
         here = sha == s.head_sha
         c = g.commit(sha)
         label = "where you are" if here else f"the save “{c.subject if c else sha[:7]}”"
-        name = await self.app.ask_branch_name(s, label)
+        name = name or await self.app.ask_branch_name(s, label)
         if not name:
             return
         blocking = [] if here else await asyncio.to_thread(git.unsaved_in_the_way, s, sha)
@@ -515,7 +542,11 @@ class BranchMap(Vertical, can_focus=True):
         if reason := self._busy_reason():
             self.notify(reason, severity="warning")
             return
-        s, g, target = self.s, self.g, lane.name
+        await self.combine_branches(source, lane.name)
+
+    async def combine_branches(self, source: str, target: str) -> None:
+        """Bring `source` into `target`, with a conflict forecast and a before/after picture."""
+        s, g = self.s, self.g
         if await asyncio.to_thread(git.is_ancestor, s.root, source, target):
             self.notify(f"Everything in {source} is already in {target}. Nothing to combine.")
             return
@@ -530,9 +561,9 @@ class BranchMap(Vertical, can_focus=True):
             return
         status, files = await asyncio.to_thread(git.predict_merge, s.root, target, source)
         if status == "clean":
-            note = "[green]✓ No conflicts expected.[/] gitly checked this without touching your files."
+            note = "[$success]✓ No conflicts expected.[/] gitly checked this without touching your files."
         elif status == "conflict":
-            note = (f"[yellow]⚠ Both branches changed {escape(', '.join(files[:5]))} in different ways.[/] "
+            note = (f"[$warning]⚠ Both branches changed {escape(', '.join(files[:5]))} in different ways.[/] "
                     "Git will stop and mark the spots so you can pick what to keep, then choose "
                     "“I fixed the conflicts, finish”. You can cancel the combining at any point.")
         else:
@@ -594,7 +625,7 @@ class BranchMap(Vertical, can_focus=True):
                 notes.append("This save is already on GitHub, so gitly adds an opposite save instead of "
                              "erasing it. Erasing shared saves causes trouble for anyone who already has them.")
             if c.is_merge:
-                notes.append("[yellow]Heads up:[/] after undoing a merge, merging the same branch again "
+                notes.append("[$warning]Heads up:[/] after undoing a merge, merging the same branch again "
                              "won't bring those changes back by itself, because git thinks they're already "
                              "in. If you change your mind later, undo this undo instead.")
             if not is_head:
@@ -650,27 +681,42 @@ class BranchMap(Vertical, can_focus=True):
 class Gitly(App):
     TITLE = "gitly"
     CSS = """
-    Screen { background: $surface; }
+    Screen { background: $background; }
+    * { border-title-color: $text-muted; border-subtitle-color: $text-muted; }
     #top { padding: 1 2 0 2; height: auto; }
+    #title { width: 1fr; height: auto; }
+    #aistatus { width: auto; height: auto; }
     #summary { padding: 0 2; height: auto; }
     #banner { margin: 1 2 0 2; padding: 0 1; height: auto; background: $warning 20%; display: none; }
     #banner.show { display: block; }
     #body { height: 1fr; padding: 1 2; }
     #left { width: 1fr; height: 100%; }
-    #files { height: auto; max-height: 40%; border: round $panel; padding: 0 1; }
+    #next { height: auto; border: round $primary; background: $primary 7%; padding: 0 1;
+            border-title-color: $primary; border-title-style: bold; }
+    #next.quiet { border: round $panel-lighten-2; background: transparent; border-title-color: $text-muted; }
+    #next Static { height: auto; }
+    #next-reason { padding-left: 2; color: $text-muted; }
+    OptionList > .option-list--option-highlighted { background: $primary 14%; color: $text; text-style: none; }
+    OptionList:focus > .option-list--option-highlighted { background: $primary 30%; color: $text;
+                                                           text-style: bold; }
+    OptionList > .option-list--separator { color: $panel-lighten-2; }
+    #files { height: auto; max-height: 30%; border: round $panel-lighten-2; padding: 0 1; }
     #branchmap { height: 1fr; }
-    #menu { width: 46; height: 100%; border: round $accent; }
-    ModalScreen { align: center middle; background: $background 60%; }
+    #menu { width: 46; height: 100%; border: round $panel-lighten-2; background: transparent; padding: 0 1; }
+    #menu:focus { border: round $accent; border-title-color: $accent; }
+    ModalScreen { align: center middle; background: $background 70%; }
     .dialog { width: 64; max-width: 95%; height: auto; max-height: 90%;
-              border: round $accent; background: $panel; padding: 1 2; }
+              border: round $primary; background: $surface; padding: 1 2; }
     .dialog.wide { width: 90; }
     .dialog-title { margin-bottom: 1; }
+    .dialog OptionList { border: none; background: transparent; padding: 0; }
     .dialog OptionList { height: auto; max-height: 16; margin: 1 0; }
     .dialog Input { margin: 1 0; }
     .plan-body { height: auto; max-height: 24; }
     .step { margin: 0 0 1 0; }
     .note { margin-bottom: 1; }
-    .preview { margin-bottom: 1; text-wrap: nowrap; text-overflow: ellipsis; }
+    .preview { margin-bottom: 1; padding: 0 1; border-left: thick $panel-lighten-2;
+               text-wrap: nowrap; text-overflow: ellipsis; }
     .muted { color: $text-muted; margin-bottom: 1; }
     .raw { margin-top: 1; }
     .buttons { height: auto; margin-top: 1; }
@@ -679,6 +725,7 @@ class Gitly(App):
     """
     BINDINGS = [
         Binding("question_mark", "ask", "Ask in plain English"),
+        Binding("x", "not_now", "Skip suggestion"),
         Binding("r", "refresh", "Refresh"),
         Binding("q", "quit", "Quit"),
     ]
@@ -689,15 +736,33 @@ class Gitly(App):
         self.repo: git.RepoState | None = None
         self.log_ = StudyLog(participant)
         self.busy = False
+        self.register_theme(THEME)
+        self.theme = "gitly"
+        # The next step (see suggest.py). The AI's take is cached per repo signature.
+        self.suggestion: suggest.Suggestion | None = None
+        self._shown: str | None = None  # key of the suggestion on screen, to log each one once
+        self._dismissed: set[str] = set()
+        self._sig: str | None = None
+        self._sig_since = 0.0  # when the repo last changed under us
+        self._ai_cache: dict[str, suggest.Suggestion] = {}
+        self._ai_skip: set[str] = set()  # signatures the AI failed on
+        self._ai_running = False
+        self._ai_last = float("-inf")
+        self._ai_failures = 0
 
     # ---- layout
 
     def compose(self) -> ComposeResult:
-        yield Static(id="top")
+        with Horizontal(id="top"):
+            yield Static(id="title")
+            yield Static(id="aistatus")
         yield Static(id="summary")
         yield Static(id="banner")
         with Horizontal(id="body"):
             with Vertical(id="left"):
+                with Vertical(id="next"):
+                    yield Static(id="next-title")
+                    yield Static(id="next-reason")
                 yield VerticalScroll(Static(id="filelist"), id="files")
                 yield BranchMap(id="branchmap")
             yield OptionList(id="menu")
@@ -715,7 +780,7 @@ class Gitly(App):
 
     def _poll(self) -> None:
         if not self.busy and self.screen is self.screen_stack[0]:
-            self.refresh_state(keep_highlight=True)
+            self.refresh_state(keep_highlight=True, settle=True)
 
     @property
     def home(self):
@@ -724,27 +789,33 @@ class Gitly(App):
 
     # ---- state → screen
 
-    def refresh_state(self, keep_highlight: bool = False) -> None:
+    def refresh_state(self, keep_highlight: bool = False, settle: bool = False) -> None:
+        """Re-read the repo and redraw the home screen.
+
+        settle: the change may be the user (or their AI tool) mid-edit, so the
+        AI waits until the files stop changing before it looks.
+        """
         if not self.is_running or not self.screen_stack:
             return
         self.repo = git.state(self.cwd)
         s = self.repo
-        top = self.home.query_one("#top", Static)
+        top = self.home.query_one("#title", Static)
         summary = self.home.query_one("#summary", Static)
         banner = self.home.query_one("#banner", Static)
         files = self.home.query_one("#filelist", Static)
 
         if s is None:
-            top.update(f"[b]gitly[/]  [dim]{escape(self.cwd)}[/]")
+            top.update(f"[b $background on $accent] gitly [/]  [dim]{escape(self._short_path(self.cwd))}[/]")
             summary.update("This folder isn't a git project yet.")
             banner.remove_class("show")
             files.update("[dim]Nothing tracked yet.[/]")
-            self._set_menu([("init", "Start tracking this folder"), None,
-                            ("ask", "Ask in plain English  [dim]?[/]"), ("quit", "Quit")], keep_highlight)
             self.home.query_one(BranchMap).update_state(None)
+            self._set_menu(self._with_next([("init", "Start tracking this folder"), None,
+                                            ("ask", "Ask in plain English  [dim]?[/]"), ("quit", "Quit")],
+                                           None, settle), keep_highlight)
             return
 
-        top.update(f"[b]gitly[/]  [dim]{escape(s.root)}[/]")
+        top.update(f"[b $background on $accent] gitly [/]  [dim]{escape(self._short_path(s.root))}[/]")
         summary.update(s.summary())
 
         warn = ""
@@ -761,16 +832,16 @@ class Gitly(App):
 
         lines = []
         for c in s.conflicts:
-            lines.append(f"[b magenta]conflict[/]  {escape(c)}")
+            lines.append(f"[b #f9a8d4]conflict[/]  {escape(c)}")
         seen = set()
         for c in s.changes:
             if c.path in seen:
                 continue
             seen.add(c.path)
-            col = STATUS_COLOR.get(c.status, "yellow")
+            col = STATUS_COLOR.get(c.status, "$warning")
             lines.append(f"[{col}]{c.status:<9}[/] {escape(c.path)}")
         for u in s.untracked:
-            lines.append(f"[green]{'new':<9}[/] {escape(u)}")
+            lines.append(f"[$success]{'new':<9}[/] {escape(u)}")
         files.update("\n".join(lines) if lines else "[dim]No unsaved changes.[/]")
 
         menu: list = []
@@ -785,10 +856,11 @@ class Gitly(App):
         up_hint = f"  [dim]({s.ahead} new)[/]" if s.ahead else ""
         pull_hint = f"  [dim]({s.behind} waiting)[/]" if s.behind else ""
         menu += [
-            ("save", "Save my work" + save_hint),
+            ("save", "Save my work" + save_hint, not n),  # greyed out while there's nothing to save
             *([("explain", "What did I change?")] if s.dirty else []),
             ("upload", "Upload to GitHub" + up_hint),
             ("pull", "Get latest" + pull_hint),
+            None,
             ("branches", "Branches…"),
             ("undo", "Undo…"),
             ("history", "History"),
@@ -796,21 +868,154 @@ class Gitly(App):
         if not s.remotes:
             menu.append(("connect", "Connect to GitHub…"))
         menu += [None, ("ask", "Ask in plain English  [dim]?[/]"), ("quit", "Quit  [dim]q[/]")]
-        self._set_menu(menu, keep_highlight)
-        self.home.query_one(BranchMap).update_state(s)
+        self.home.query_one(BranchMap).update_state(s)  # before the suggestion: it reads the map
+        self._set_menu(self._with_next(menu, s, settle), keep_highlight)
+
+    @staticmethod
+    def _short_path(path: str) -> str:
+        home = str(Path.home())
+        return "~" + path[len(home):] if path == home or path.startswith(home + os.sep) else path
+
+    # ---- the next step
+
+    AI_SETTLE = 4.0  # seconds the files must sit still before the AI reads them
+    AI_GAP = 20.0  # at least this long between two background AI calls
+
+    def _with_next(self, menu: list, s: git.RepoState | None, settle: bool) -> list:
+        """Work out the next step, show it, and put it at the top of the menu."""
+        sg = self._suggest(s, settle)
+        ai_made = sg.source == "ai"
+        mark = f"[b {AI_COLOR}]✦[/]" if ai_made else "[b $primary]➜[/]"
+        panel = self.home.query_one("#next")
+        panel.query_one("#next-title", Static).update(f"{mark} [b]{escape(sg.title)}[/]")
+        panel.query_one("#next-reason", Static).update(escape(sg.reason))
+        panel.set_class(not sg.acceptable, "quiet")
+        panel.border_title = "Next step"
+        if self._ai_running:
+            panel.border_subtitle = f"[{AI_COLOR}]✦[/] AI is reading your project…"
+        elif not sg.acceptable:
+            panel.border_subtitle = f"[{AI_COLOR}]✦[/] from the AI" if ai_made else ""
+        else:
+            panel.border_subtitle = ((f"[{AI_COLOR}]✦[/] suggested by AI · " if ai_made else "")
+                                     + "Enter: do it · x: not now")
+        self.home.query_one("#aistatus", Static).update(
+            f"[{AI_COLOR}]✦[/] [dim]AI suggestions on[/]" if suggest.ambient() and self._ai_failures < 3
+            else "[dim]✦ AI on request[/]" if ai.available()
+            else "[dim]✦ AI off · press ? to turn it on[/]")
+        self.home.query_one(BranchMap).set_ghost(suggest.ghost(sg, s) if sg.acceptable else None)
+        first = next((i[0] for i in menu if i), None)
+        if sg.acceptable and sg.menu != first:  # when it's already the top item, don't say it twice
+            title = sg.title if len(sg.title) <= 38 else sg.title[:37].rstrip() + "…"
+            menu = [("next", f"{mark} [b]{escape(title)}[/]\n  [dim]suggested next step[/]"), None] + menu
+        return menu
+
+    def _suggest(self, s: git.RepoState | None, settle: bool) -> suggest.Suggestion:
+        g = self.home.query_one(BranchMap).g if s else None
+        base = suggest.rules(s, g)
+        sig = suggest.signature(s)
+        now = time.monotonic()
+        if sig != self._sig:
+            self._sig, self._sig_since = sig, now if settle else 0.0
+        sg = self._ai_cache.get(sig, base)
+        if (sig not in self._ai_cache and sig not in self._ai_skip and not self._ai_running
+                and self._ai_failures < 3 and self.app_focus and suggest.allowed(s, base)
+                and suggest.ambient() and now - self._sig_since >= self.AI_SETTLE
+                and now - self._ai_last >= self.AI_GAP):
+            self._ai_running = True
+            self._think(sig, s, g, base)
+        if sg.key in self._dismissed:
+            sg = suggest.Suggestion("none", "Nothing suggested right now",
+                                    "You skipped the last suggestion. Pick anything from the menu.")
+        if sg.key != self._shown:
+            self._shown = sg.key
+            self.log_.event("suggestion_shown", step=sg.kind, source=sg.source, title=sg.title)
+        self.suggestion = sg
+        return sg
+
+    @work(group="ai")
+    async def _think(self, sig: str, s: git.RepoState, g: graph.Graph | None,
+                     base: suggest.Suggestion) -> None:
+        """Let the AI refine the suggestion in the background. Failures stay quiet."""
+        try:
+            sg, tel = await asyncio.to_thread(suggest.from_ai, s, g, base)
+        except Exception as e:  # never let a background guess take the app down
+            self._ai_skip.add(sig)
+            self._ai_failures += 1
+            self.log_.event("ai_error", feature="ai_next", message=str(e))
+        else:
+            self._ai_failures = 0
+            if len(self._ai_cache) > 32:
+                self._ai_cache.clear()
+            self._ai_cache[sig] = sg
+            self.log_.event("ai_next", **tel)
+        finally:
+            self._ai_running = False
+            self._ai_last = time.monotonic()
+        if not self.busy and self.screen is self.screen_stack[0]:
+            self.refresh_state(keep_highlight=True)
+
+    def action_not_now(self) -> None:
+        sg = self.suggestion
+        if sg is None or not sg.acceptable or self.screen is not self.screen_stack[0]:
+            return
+        self._dismissed.add(sg.key)
+        self.log_.event("suggestion_dismissed", step=sg.kind, source=sg.source)
+        self.refresh_state()
+
+    async def accept_suggestion(self) -> Plan | None:
+        """The user took the suggested next step. Returns a plan, unless the step ran its own flow."""
+        sg, s = self.suggestion, self.repo
+        if sg is None or not sg.acceptable:
+            return None
+        self.log_.event("suggestion_accepted", step=sg.kind, source=sg.source)
+        if sg.menu:
+            return await self.plan_for(sg.menu)
+        if s is None:
+            return None
+        bm = self.home.query_one(BranchMap)
+        if sg.kind == "save":
+            return await self.prepare_save(s, message=sg.message)
+        if sg.kind == "split_save":
+            return await self.split_save(s, sg)
+        if sg.kind == "cleanup":
+            return actions.delete_branch(sg.branch)
+        if sg.kind == "new_branch" and s.head_sha:
+            await bm.new_branch(s.head_sha, name=sg.branch)
+        elif sg.kind == "merge":
+            await bm.combine_branches(sg.branch, sg.target)
+        return None
+
+    async def split_save(self, s: git.RepoState, sg: suggest.Suggestion) -> Plan | None:
+        findings = await asyncio.to_thread(precheck.check, s)
+        if findings:  # something here shouldn't be saved: use the ordinary save, which deals with that
+            return await self.prepare_save(s)
+        g = self.home.query_one(BranchMap).g
+        preview = None
+        if g:
+            after = g
+            for grp in sg.groups:
+                after = graph.after_save(after, grp.message)
+            preview = (graph.render(g, s, compact=True), graph.render(after, s, compact=True, unsaved=0))
+        return actions.split_save(s, [(grp.message, grp.files) for grp in sg.groups],
+                                  note=sg.reason, preview=preview)
 
     def _set_menu(self, items: list, keep_highlight: bool) -> None:
+        """items: (key, label) or (key, label, disabled); None draws a separator."""
         ol = self.home.query_one("#menu", OptionList)
         prev = ol.highlighted_option.id if (keep_highlight and ol.highlighted_option) else None
-        ol.set_options([Option(label, id=key) if key else None
-                        for key, label in (i if i else (None, None) for i in items)])
+        ol.set_options([Option(i[1], id=i[0], disabled=len(i) > 2 and i[2]) if i else None for i in items])
         if prev:
             try:
                 ol.highlighted = ol.get_option_index(prev)
                 return
             except Exception:
                 pass
-        ol.highlighted = 0
+        # Start on the suggested step, so Enter does the sensible thing.
+        keys = [i[0] for i in items if i and not (len(i) > 2 and i[2])]
+        want = self.suggestion.menu if self.suggestion and self.suggestion.acceptable else None
+        start = "next" if "next" in keys else want if want in keys else keys[0] if keys else None
+        if start:
+            ol.highlighted = ol.get_option_index(start)
 
     # ---- menu dispatch
 
@@ -828,52 +1033,53 @@ class Gitly(App):
 
     @work(exclusive=True)
     async def handle(self, key: str) -> None:
-        s = self.repo
         if key == "quit":
             self.exit()
             return
         if key == "ask":
             await self.ask_flow()
             return
-        if key == "init":
-            await self.execute(actions.init_repo())
-            return
-        if s is None:
-            return
+        plan = await (self.accept_suggestion() if key == "next" else self.plan_for(key))
+        if plan:
+            await self.execute(plan)
 
-        plan: Plan | None = None
+    async def plan_for(self, key: str) -> Plan | None:
+        """Run the flow behind a menu item. Returns the plan to review, if it ends in one."""
+        s = self.repo
+        if key == "init":
+            return actions.init_repo()
+        if s is None:
+            return None
         if key == "save":
             if not s.dirty:
                 self.notify("Nothing to save: no changes since your last save.")
-                return
-            plan = await self.prepare_save(s)
-        elif key == "explain":
+                return None
+            return await self.prepare_save(s)
+        if key == "explain":
             await self.explain_flow(s)
         elif key == "upload":
-            plan = actions.upload(s)
+            return actions.upload(s)
         elif key == "pull":
-            plan = actions.get_latest(s)
+            return actions.get_latest(s)
         elif key == "branches":
-            plan = await self.branches_flow(s)
+            return await self.branches_flow(s)
         elif key == "undo":
-            plan = await self.undo_flow(s)
+            return await self.undo_flow(s)
         elif key == "history":
             lines = git.recent_log(s.root, 30)
             body = "\n".join(escape(l) for l in lines) or "[dim]No saves yet.[/]"
             await self.push_screen_wait(TextScreen("History (newest first)", body))
         elif key == "connect":
-            plan = await self.connect_flow()
+            return await self.connect_flow()
         elif key == "finish_merge":
-            plan = actions.finish_merge()
+            return actions.finish_merge()
         elif key == "abort_merge":
-            plan = actions.abort_merge(s)
+            return actions.abort_merge(s)
         elif key == "branch_here":
-            plan = actions.branch_here()
+            return actions.branch_here()
         elif key == "back_to_branch":
-            plan = actions.back_to_branch()
-
-        if plan:
-            await self.execute(plan)
+            return actions.back_to_branch()
+        return None
 
     async def branches_flow(self, s: git.RepoState) -> Plan | None:
         what = await self.push_screen_wait(ChooseScreen("Branches", [
@@ -933,8 +1139,12 @@ class Gitly(App):
             hint="Create an empty repository on github.com, then paste its URL here."))
         return actions.connect_remote(url) if url else None
 
-    async def prepare_save(self, s: git.RepoState) -> Plan | None:
-        """Pre-save check, AI description, and message prompt. Returns the save plan or None."""
+    async def prepare_save(self, s: git.RepoState, message: str = "") -> Plan | None:
+        """Pre-save check, AI description, and message prompt. Returns the save plan or None.
+
+        message: a description the AI already wrote for these changes (the
+        suggested next step), so it isn't asked again.
+        """
         findings = await asyncio.to_thread(precheck.check, s)
         to_save = s
         if findings:
@@ -946,8 +1156,11 @@ class Gitly(App):
                 to_save = precheck.without(s, findings)
             else:
                 findings = []
-        suggestion = ""
-        if ai.available() and to_save.dirty:
+        ahead = self._ai_cache.get(suggest.signature(s))
+        suggestion = message or (ahead.message if ahead and ahead.kind == "save" else "")
+        if to_save is not s:
+            suggestion = ""  # files were left out, so that description may not fit anymore
+        if not suggestion and ai.available() and to_save.dirty:
             suggestion = await self.with_ai(
                 ai.suggest_commit_message, to_save, doing="writing a description of your changes",
                 event="ai_commit_message") or ""
@@ -1026,6 +1239,7 @@ class Gitly(App):
             self.notify(f"Couldn't save the key: {e}", severity="error", timeout=8)
             return False
         self.log_.event("ai_key_saved", replaced=rejected)
+        self._ai_failures = 0
         self.notify("Key saved. AI features are on.")
         return True
 
@@ -1091,7 +1305,7 @@ class Gitly(App):
             await self._execute(plan)
         finally:
             self.busy = False
-            self.refresh_state(keep_highlight=True)
+            self.refresh_state()  # back on the menu, the cursor moves to the new next step
 
     async def _execute(self, plan: Plan) -> None:
         log = self.log_

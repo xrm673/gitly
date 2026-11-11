@@ -16,6 +16,31 @@ def save_work(s: RepoState, message: str) -> Plan:
     return Plan("Save my work", steps, summary=f'Save all changes as "{message}".')
 
 
+def split_save(s: RepoState, groups: list[tuple[str, list[str]]], note: str = "",
+               preview: tuple[str, str] | None = None) -> Plan:
+    """Save unrelated changes as separate saves. groups: (description, files), in order.
+
+    The last save takes everything that's left, so nothing stays unsaved.
+    """
+    steps = []
+    if s.staged:
+        steps.append(Step(["restore", "--staged", "."],
+                          "Unmark files that were already marked for saving, so each save gets only "
+                          "its own files. Your edits stay exactly as they are."))
+    for i, (message, files) in enumerate(groups):
+        if i == len(groups) - 1:
+            steps.append(Step(["add", "--all"], "Mark everything that's left for the last save: "
+                              + ", ".join(files[:4]) + (" …" if len(files) > 4 else "") + "."))
+        else:
+            steps.append(Step(["add", "--", *files],
+                              f"Mark only {'this file' if len(files) == 1 else f'these {len(files)} files'} "
+                              "for the next save."))
+        steps.append(Step(["commit", "-m", message], f"Save {'them' if len(files) != 1 else 'it'} as one snapshot."))
+    return Plan("Save as separate saves", steps, source="ai", note=note, preview=preview,
+                summary=f"Your changes become {len(groups)} saves instead of one, so each can be "
+                        "understood (and undone) by itself.")
+
+
 def upload(s: RepoState) -> Plan:
     if not s.remotes:
         return Plan("Upload to GitHub", [], note=(

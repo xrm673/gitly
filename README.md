@@ -6,18 +6,23 @@ plain-English explanations when something goes wrong, and an AI helper that
 always shows you the exact command before anything runs.
 
 ```
- gitly  ~/projects/my-app
- You're on login. 2 files changed, not saved yet. GitHub has 2 commits you don't.
+  gitly   ~/projects/my-app                                  ✦ AI suggestions on
+ You're on login. 2 files changed, not saved yet. In sync with GitHub.
 
- ╭ Changes ─────────────────────────────╮ ╭ What do you want to do? ──────╮
- │ modified  app.py                     │ │ ❯ Save my work  (2 files)     │
- │ new       login.html                 │ │   What did I change?          │
- ╰──────────────────────────────────────╯ │   Upload to GitHub            │
- ╭ Branches ────────────────────────────╮ │   Get latest  (2 waiting)     │
- │   main    ●──●──●─────●──○──○        │ │   Branches…                   │
- │ ▶ login         ╰──●──◉ you are here │ │   Undo…                       │
- │   old-idea      ╰──●                 │ │   History                     │
- ╰─ tab: pick a save to branch, switch… ╯ │   Ask in plain English  ?     │
+ ╭ Next step ───────────────────────────╮ ╭ What do you want to do? ──────╮
+ │ ✦ Save as 2 separate saves           │ │ ❯ ✦ Save as 2 separate saves  │
+ │   Your changes touch the login form  │ │     suggested next step       │
+ │   and, separately, a payments file.  │ │   ─────────────────────────   │
+ ╰── ✦ suggested by AI · Enter: do it ──╯ │   Save my work  (2 files)     │
+ ╭ Changes ─────────────────────────────╮ │   What did I change?          │
+ │ modified  login.py                   │ │   Upload to GitHub            │
+ │ new       pay.py                     │ │   Get latest                  │
+ ╰──────────────────────────────────────╯ │   ─────────────────────────   │
+ ╭ Branches ────────────────────────────╮ │   Branches…                   │
+ │   main    ●──●──●──●    ✓ on GitHub  │ │   Undo…                       │
+ │ ▶ login            ╰──●──◉╌╌◌╌╌◌     │ │   History                     │
+ │                      you are here    │ │   ─────────────────────────   │
+ ╰─ ● save  ◉ you  ◌ suggested ─────────╯ │   Ask in plain English  ?     │
                                           ╰───────────────────────────────╯
 ```
 
@@ -49,7 +54,8 @@ You can use an environment variable instead; it takes priority over the saved ke
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-export GITLY_MODEL=claude-haiku-5-5   # optional; this is the default
+export GITLY_MODEL=claude-sonnet-5-5   # optional; this is the default
+export GITLY_AI_SUGGEST=0               # optional; AI only when you ask for it
 ```
 
 Everything except the AI features works without a key.
@@ -66,11 +72,37 @@ a risk level. You see the plan and confirm it before anything runs.
 | careful | `pull`, `reset --soft`, `branch --delete` | Enter runs it, marked yellow |
 | risky | `reset --hard`, `push --force`, `clean` | You type `yes`; gitly saves a backup first |
 
+**Next step.** The top of the home screen always says what to do next, and
+why: save your work, upload it, get the latest, combine a finished branch,
+delete one that's already combined. It's the first item in the menu, so
+`Enter` does it (you still review the plan first) and `x` skips it. The same
+step is drawn faintly on the branch map, like autocomplete in an editor: `◌`
+is a save that doesn't exist yet, a dashed line is where a branch would go.
+
+Without an API key the step comes from the repo state alone (`rules()` in
+`gitly/suggest.py`). With a key, the AI also reads your unsaved changes in the
+background and refines it, marked with `✦`:
+
+- writes the save description ahead of time, so it's already filled in
+- suggests splitting unrelated changes into two or three separate saves
+- suggests starting a branch when the changes don't belong where you are
+- says whether a saved branch looks finished or still in progress
+
+The AI doesn't write git commands for this. It picks one action from a short
+list gitly computed for the current state, and gitly builds the plan; a pick
+that isn't on the list, a file list that doesn't match your changes exactly,
+or a bad branch name is thrown away and the plain suggestion stays. It runs
+once per change, after your files have been still for a few seconds, at most
+every 20 seconds, and only while the gitly window has focus. Failures are
+silent, and after three in a row it stops for the session. Turn it off with
+`GITLY_AI_SUGGEST=0`; the AI features you start yourself keep working.
+
 **Branch map.** The home screen shows your branches as a simple picture,
 under your changed files: one row per branch, left = older, right = newer,
 starting from the save it grew out of. It shows where you are, your unsaved
 changes, which saves are only on GitHub (hollow dots) or not uploaded yet, and
-branches that were already combined into main. It's a simplified view, not a
+branches that were already combined into main. Each row ends with its latest
+save's description, so the dots aren't anonymous. It's a simplified view, not a
 full commit graph: each branch shows its last few saves of its own. See
 `gitly/graph.py`.
 
@@ -144,8 +176,8 @@ if the AI is down, gitly just tidies what you typed (`Login stuff!` →
 It gives a plain-English summary of the changes and flags anything that looks
 accidental (leftover debug code, a deleted feature, a secrets file).
 
-**What gets sent to the AI.** Both features send the unsaved diff to the
-Anthropic API: tracked edits plus new files, capped at about 3,000 characters
+**What gets sent to the AI.** These features, and the background next-step
+suggestion, send the unsaved diff to the Anthropic API: tracked edits plus new files, capped at about 3,000 characters
 per file and 12,000 in total. Files that look like secrets (`.env*`, `*.pem`,
 `*.key`, `id_rsa`, `.npmrc`, `credentials.json`, …) are listed by name only,
 API keys found in other files are replaced with `[secret removed by gitly]`,
@@ -167,8 +199,9 @@ gitly --study P07
 writes one JSON event per line to `~/.gitly/logs/P07-<timestamp>.jsonl`: menu
 choices, plans shown, whether they were run or cancelled, each command's exit
 code and duration, failures and which rescue was offered, AI questions, latency
-and token counts, and whether an AI-suggested save description was kept, edited
-or cancelled. File contents are never logged and nothing is uploaded.
+and token counts, whether an AI-suggested save description was kept, edited
+or cancelled, and each next-step suggestion: shown, accepted or skipped, and
+whether it came from the rules or the AI. File contents are never logged and nothing is uploaded.
 Override the folder with `GITLY_LOG_DIR`.
 
 ## Code map
@@ -179,11 +212,12 @@ Override the folder with `GITLY_LOG_DIR`.
 | `gitly/git.py` | Runs the real `git` CLI; parses status; backups |
 | `gitly/actions.py` | The no-AI menu plans |
 | `gitly/rescue.py` | Error pattern → explanation + fixes |
-| `gitly/graph.py` | Branch map: lanes per branch, layout, rendering |
+| `gitly/graph.py` | Branch map: lanes per branch, layout, rendering, the ghost of the next step |
+| `gitly/suggest.py` | The next step: rules, what the AI may change, checks on its answer |
 | `gitly/precheck.py` | Pre-save check: findings + the "leave these out" plan |
 | `gitly/secretscan.py` | Secret file names and API key patterns |
 | `gitly/safety.py` | Risk levels and blocked commands |
-| `gitly/ai.py` | AI features (Anthropic API): Ask → plan, save descriptions, change summaries |
+| `gitly/ai.py` | AI features (Anthropic API): Ask → plan, save descriptions, change summaries, next step |
 | `gitly/studylog.py` | Opt-in JSONL event log |
 
 ## Tests

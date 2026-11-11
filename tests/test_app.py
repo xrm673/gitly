@@ -33,7 +33,7 @@ async def test_save_flow(repo, tmp_path, monkeypatch):
         assert not app.repo.dirty
     assert "fix typo" in sh(repo, "log", "-1", "--format=%s")
     events = [json.loads(l)["event"] for l in next((tmp_path / "logs").iterdir()).read_text().splitlines()]
-    assert events[:2] == ["start", "menu"] and "step" in events
+    assert events[:3] == ["start", "suggestion_shown", "menu"] and "step" in events
 
 
 async def test_cancel_runs_nothing(repo):
@@ -255,9 +255,9 @@ async def test_branch_map_on_home_screen(repo):
         bm = app.query_one(BranchMap)
         text = str(bm.query_one("#map").render())
         assert "login" in text and "you are here" in text  # visible without opening anything
-        assert app.focused.id == "menu" and not bm.query_one("#map-detail").display
+        assert app.focused.id == "menu" and "Tab" in str(bm.query_one("#map-detail").render())
         await pilot.press("tab")
-        assert app.focused is bm and bm.query_one("#map-detail").display
+        assert app.focused is bm and "login form" in str(bm.query_one("#map-detail").render())
         await pilot.press("escape")
         assert app.focused.id == "menu"
         menu = app.query_one("#menu")
@@ -636,3 +636,208 @@ async def test_ask_without_key_offers_to_save_one(repo, tmp_path, monkeypatch):
         await pilot.press("escape")
         await app.workers.wait_for_complete()
     assert ai.saved_key() == "sk-ant-abc"
+
+
+# ---- the next step
+
+def text_of(app, selector):
+    return str(app.query_one(selector).render())
+
+
+def menu_ids(app):
+    menu = app.query_one("#menu")
+    return [o.id for o in (menu.get_option_at_index(i) for i in range(menu.option_count))]
+
+
+async def test_home_starts_on_the_next_step(repo):
+    from gitly.app import BranchMap
+
+    (repo / "a.txt").write_text("edited\n")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert "Save your work" in text_of(app, "#next-title") and "1 file" in text_of(app, "#next-reason")
+        assert app.query_one("#menu").highlighted_option.id == "next"
+        assert "◉╌╌◌" in str(app.query_one(BranchMap).query_one("#map").render())  # drawn on the map too
+        await pilot.press("enter")
+        await wait_for(pilot, AskTextScreen)
+        await pilot.press(*"typo", "enter")
+        await wait_for(pilot, PlanScreen)
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        # Saved: the suggestion moves on, and so does the cursor.
+        assert "Connect to GitHub" in text_of(app, "#next-title")
+        assert app.query_one("#menu").highlighted_option.id == "next"
+        assert "◌" not in str(app.query_one(BranchMap).query_one("#map").render())
+    assert sh(repo, "log", "-1", "--format=%s").strip() == "typo"
+
+
+async def test_nothing_to_save_is_greyed_out(remote_pair):
+    repo, _ = remote_pair
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        menu = app.query_one("#menu")
+        assert "all caught up" in text_of(app, "#next-title") and "next" not in menu_ids(app)
+        assert menu.get_option("save").disabled and menu.highlighted_option.id == "upload"
+        (repo / "a.txt").write_text("edited\n")
+        app.refresh_state(keep_highlight=True)
+        assert not menu.get_option("save").disabled and menu_ids(app)[0] == "next"
+
+
+async def test_skip_suggestion(repo, tmp_path, monkeypatch):
+    from gitly.app import BranchMap
+
+    monkeypatch.setenv("GITLY_LOG_DIR", str(tmp_path / "logs"))
+    (repo / "a.txt").write_text("edited\n")
+    app = Gitly(str(repo), participant="P09")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("x")
+        await pilot.pause()
+        assert "Nothing suggested" in text_of(app, "#next-title") and "next" not in menu_ids(app)
+        assert "◌" not in str(app.query_one(BranchMap).query_one("#map").render())
+        app.refresh_state(keep_highlight=True)  # it stays skipped
+        assert "next" not in menu_ids(app)
+    events = [json.loads(l) for l in next((tmp_path / "logs").iterdir()).read_text().splitlines()]
+    assert {"event": "suggestion_dismissed", "step": "save"}.items() <= next(
+        e for e in events if e["event"] == "suggestion_dismissed").items()
+
+
+async def test_accepting_combine_shows_the_plan(repo):
+    sh(repo, "switch", "-qc", "login")
+    (repo / "l.txt").write_text("x"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "login form")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert "Combine login into main" in text_of(app, "#next-title")
+        await pilot.press("enter")
+        plan = (await wait_for(pilot, PlanScreen)).plan
+        assert [st.args[0] for st in plan.steps] == ["switch", "merge"] and plan.preview
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "Delete login" in text_of(app, "#next-title")  # combined, so the branch can go
+    assert "login form" in sh(repo, "log", "main", "--format=%s")
+
+
+def ai_on(monkeypatch, reply):
+    """Turn on background suggestions with a canned AI answer. Returns the list of calls made."""
+    from gitly import ai, suggest
+
+    calls = []
+
+    def fake(s, g, base):
+        calls.append(base.kind)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply(s, base), {"model": "m"}
+
+    monkeypatch.setenv("GITLY_AI_SUGGEST", "1")
+    monkeypatch.setattr(ai, "available", lambda: True)
+    monkeypatch.setattr(suggest, "from_ai", fake)
+    return calls
+
+
+async def test_ai_splits_unrelated_changes(repo, monkeypatch):
+    from gitly import suggest
+    from gitly.app import BranchMap
+
+    calls = ai_on(monkeypatch, lambda s, base: suggest.Suggestion(
+        "split_save", "Save as 2 separate saves", "Two unrelated things changed.", source="ai",
+        groups=[suggest.SaveGroup("Fix a", ["a.txt"]), suggest.SaveGroup("Add payments", ["pay.py"])]))
+    (repo / "a.txt").write_text("edited\n")
+    (repo / "pay.py").write_text("x")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "Save as 2 separate saves" in text_of(app, "#next-title")
+        assert "◉╌╌◌╌╌◌" in str(app.query_one(BranchMap).query_one("#map").render())
+        app.refresh_state(keep_highlight=True)
+        await app.workers.wait_for_complete()
+        assert calls == ["save"]  # same files, same answer: the AI isn't asked again
+        await pilot.press("enter")
+        plan = (await wait_for(pilot, PlanScreen)).plan
+        assert plan.source == "ai" and [st.args[0] for st in plan.steps] == ["add", "commit", "add", "commit"]
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert not app.repo.dirty
+    assert sh(repo, "log", "--format=%s").splitlines() == ["Add payments", "Fix a", "first"]
+
+
+async def test_ai_split_gives_way_to_the_pre_save_check(repo, monkeypatch):
+    from gitly import suggest
+    from gitly.app import PrecheckScreen
+
+    ai_on(monkeypatch, lambda s, base: suggest.Suggestion(
+        "split_save", "Save as 2 separate saves", "Two things.", source="ai",
+        groups=[suggest.SaveGroup("Fix a", ["a.txt"]), suggest.SaveGroup("Add settings", [".env"])]))
+    (repo / "a.txt").write_text("edited\n")
+    (repo / ".env").write_text("SECRET=1\n")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        await pilot.press("enter")
+        await wait_for(pilot, PrecheckScreen)  # the secrets file is caught, not saved in a group
+
+
+async def test_ai_description_is_reused_by_save(repo, monkeypatch):
+    from gitly import ai, suggest
+
+    ai_on(monkeypatch, lambda s, base: suggest.Suggestion(
+        "save", "Save your work: “Rewrite a.txt”", "One change.", source="ai", message="Rewrite a.txt"))
+
+    def never(s):
+        raise AssertionError("the description was already written")
+
+    monkeypatch.setattr(ai, "suggest_commit_message", never)
+    (repo / "a.txt").write_text("edited\n")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        await choose(pilot, "save")  # the plain menu item, not the suggestion
+        assert (await wait_for(pilot, AskTextScreen)).query_one("Input").value == "Rewrite a.txt"
+
+
+async def test_ai_trouble_stays_out_of_the_way(repo, monkeypatch):
+    from gitly import ai
+
+    calls = ai_on(monkeypatch, ai.AIUnavailable("Couldn't reach the AI service."))
+    (repo / "a.txt").write_text("edited\n")
+    app = Gitly(str(repo))
+    app.AI_GAP = 0
+    async with app.run_test(size=(120, 40)) as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app.screen is app.screen_stack[0]  # no dialog
+        assert text_of(app, "#next-title").strip().endswith("Save your work")
+        for _ in range(3):
+            app.refresh_state(keep_highlight=True)
+            await app.workers.wait_for_complete()
+        assert calls == ["save"]  # not retried for the same files
+
+
+async def test_ai_waits_for_files_to_settle(repo, monkeypatch):
+    from gitly import suggest
+
+    calls = ai_on(monkeypatch, lambda s, base: suggest.Suggestion(
+        "save", "Save your work: “x”", "One change.", source="ai", message="x"))
+    app = Gitly(str(repo))  # clean, local only: nothing for the AI to weigh in on
+    app.AI_GAP = 0
+    async with app.run_test(size=(120, 40)) as pilot:
+        await app.workers.wait_for_complete()
+        assert calls == []
+        (repo / "a.txt").write_text("being edited\n")
+        app.refresh_state(keep_highlight=True, settle=True)  # what the 3-second poll does
+        await app.workers.wait_for_complete()
+        assert calls == []  # just changed: might be mid-edit
+        app.AI_SETTLE = 0
+        app.refresh_state(keep_highlight=True, settle=True)
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert calls == ["save"] and "“x”" in text_of(app, "#next-title")

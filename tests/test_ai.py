@@ -145,3 +145,26 @@ def test_rejected_saved_key(monkeypatch, tmp_path):
         messages=SimpleNamespace(parse=reject)))
     with pytest.raises(ai.AIKeyRejected):
         ai._call("sys", "hi", ai.CommitMessage, 100)
+
+
+def test_next_step_request(repo, monkeypatch):
+    (repo / "a.txt").write_text("edited\n")
+    out = ai.NextStep(action=" Save ", reason="One change.", message="Edit a", groups=[], branch="")
+    msgs = fake_client(monkeypatch, out)
+    step, tel = ai.suggest_next(git.state(repo), "<allowed_actions>\nsave\n</allowed_actions>", with_changes=True)
+    kw = msgs.calls[0]
+    assert step.action == "save" and kw["output_format"] is ai.NextStep and kw["system"] == ai.NEXT_SYSTEM
+    content = kw["messages"][0]["content"]
+    assert "+edited" in content and "<allowed_actions>" in content
+    ai.suggest_next(git.state(repo), "facts", with_changes=False)
+    assert "+edited" not in msgs.calls[1]["messages"][0]["content"]
+
+
+def test_next_step_schema_is_accepted_by_sdk():
+    from anthropic.lib._parse._transform import transform_schema
+    assert transform_schema(ai.NextStep.model_json_schema())["additionalProperties"] is False
+
+
+def test_default_model_is_sonnet():
+    import os
+    assert ai.MODEL == os.environ.get("GITLY_MODEL", "claude-sonnet-5-5")

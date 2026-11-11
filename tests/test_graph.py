@@ -140,7 +140,7 @@ def test_not_uploaded_branch(remote_pair):
     sh(repo, "switch", "-qc", "draft")
     commit(repo, "wip")
     _, lines = picture(repo)
-    assert "in sync with GitHub" in lines[0] and "not on GitHub yet" in lines[1]
+    assert "✓ on GitHub" in lines[0] and "not on GitHub yet" in lines[1]
 
 
 def test_parents_left_of_children():
@@ -181,8 +181,8 @@ def test_render_highlights_selection(repo):
     s = git.state(repo)
     g = graph.build(s)
     x = graph.positions(g)[0][0][0]
-    assert "on yellow" in graph.render(g, s, selected=(0, x))
-    assert "on yellow" not in graph.render(g, s)
+    assert graph.SELECTED in graph.render(g, s, selected=(0, x))
+    assert graph.SELECTED not in graph.render(g, s)
 
 
 def test_ago():
@@ -214,3 +214,58 @@ def test_merge_and_undo_previews(repo):
     assert [c.subject for c in lane(un, "main").commits] == ["first"]
     assert un.head == lane(g, "main").commits[0].sha
     assert lane(g, "main").commits[-1].subject == "second"  # original untouched
+
+
+def test_rows_say_what_their_latest_save_was(repo):
+    commit(repo, "add the pricing page")
+    _, [line] = picture(repo)
+    assert "“add the pricing page”" in line
+
+
+def test_notes_are_cut_to_the_width(repo):
+    commit(repo, "a very long description of what this save was about, really")
+    s = git.state(repo)
+    g = graph.build(s)
+    for width in (40, 60, 90):
+        [line] = Text.from_markup(graph.render(g, s, max_width=width)).plain.splitlines()
+        assert len(line) <= width and "you are here" in line
+    assert "…" in Text.from_markup(graph.render(g, s, max_width=70)).plain
+
+
+def test_ghost_saves_follow_you_are_here(repo):
+    commit(repo, "second")
+    s = git.state(repo)
+    g = graph.build(s)
+    [line] = Text.from_markup(graph.render(g, s, ghost=graph.Ghost(saves=2))).plain.splitlines()
+    assert "●──◉╌╌◌╌╌◌" in line
+    assert "◌" not in graph.render(g, s)
+
+
+def test_ghost_merge_joins_the_two_rows(repo):
+    commit(repo, "second")
+    sh(repo, "switch", "-qc", "login")
+    commit(repo, "login form")
+    s = git.state(repo)
+    g = graph.build(s)
+    main, login = Text.from_markup(graph.render(g, s, ghost=graph.Ghost(merge=("login", "main")))).plain.splitlines()
+    assert "●╌╌╌╌╌◌" in main and "◉╌╌╯" in login
+    assert main.index("◌") == login.index("╯")  # the combined save sits where the two lines meet
+    # A ghost never changes what the cursor can land on.
+    assert graph.positions(g) == graph.positions(graph.build(git.state(repo)))
+
+
+def test_ghost_branch_gets_its_own_row(repo):
+    commit(repo, "second")
+    (repo / "x.txt").write_text("x")
+    s = git.state(repo)
+    g = graph.build(s)
+    lines = Text.from_markup(graph.render(g, s, ghost=graph.Ghost(branch="payments", saves=1))).plain.splitlines()
+    assert len(lines) == 2 and lines[1].startswith("  payments") and "╰╌╌◌" in lines[1]
+    assert lines[1].index("╰") == lines[0].index("◉")  # it grows out of where you are
+
+
+def test_two_previewed_saves_are_distinct(repo):
+    s = git.state(repo)
+    twice = graph.after_save(graph.after_save(graph.build(s), "one"), "two")
+    assert [c.subject for c in lane(twice, "main").commits] == ["first", "one", "two"]
+    assert len(graph.columns(twice)) == 3
