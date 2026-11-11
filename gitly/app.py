@@ -11,7 +11,7 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical, VerticalScroll
-from textual.screen import ModalScreen, Screen
+from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, LoadingIndicator, OptionList, Static
 from textual.widgets.option_list import Option
 
@@ -243,16 +243,16 @@ class ThinkingScreen(ModalScreen):
             yield LoadingIndicator()
 
 
-class MapScreen(Screen):
-    """The branch map. Arrow keys pick a save; keys act on it.
+class BranchMap(Vertical, can_focus=True):
+    """The branch map panel on the home screen. Tab focuses it.
 
-    n: new branch here · Enter: switch · Space then Enter: combine one branch
-    into another · u: undo a save.
+    While focused, arrow keys pick a save. n: new branch here · Enter: switch ·
+    Space then Enter: combine one branch into another · u: undo a save ·
+    Esc: back to the menu.
     """
 
     BINDINGS = [
-        Binding("escape", "back", "Back"),
-        Binding("q,m", "dismiss(None)", "Back", show=False),
+        Binding("escape", "back", "Back to menu"),
         Binding("left", "move(0, -1)", "Move", show=False),
         Binding("right", "move(0, 1)", "Move", show=False),
         Binding("up", "move(-1, 0)", "Move", show=False),
@@ -261,20 +261,19 @@ class MapScreen(Screen):
         Binding("enter", "enter", "Switch / drop"),
         Binding("space", "pick_up", "Combine…"),
         Binding("u", "undo", "Undo this save"),
-        Binding("r", "refresh_map", "Refresh"),
     ]
-    CSS = """
-    MapScreen { background: $surface; }
-    #map-title { padding: 1 2 0 2; height: auto; }
-    #map-wrap { height: 1fr; margin: 1 2 0 2; border: round $accent; padding: 1 1; }
-    #map { width: auto; height: auto; }
-    #map-detail { padding: 1 2 0 2; height: auto; }
-    #map-legend { padding: 1 2; height: auto; }
+    DEFAULT_CSS = """
+    BranchMap { border: round $panel; padding: 0 1; min-height: 7; }
+    BranchMap:focus { border: round $accent; }
+    BranchMap #map-wrap { height: 1fr; scrollbar-size-horizontal: 1; }
+    BranchMap #map { width: auto; height: auto; }
+    BranchMap #map-detail { height: 1; display: none; text-wrap: nowrap; text-overflow: ellipsis; }
+    BranchMap:focus #map-detail { display: block; }
     """
 
-    def __init__(self, cwd: str):
-        super().__init__()
-        self.cwd = cwd
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._sig: str | None = None  # what the graph was built from; rebuild only when it changes
         self.s: git.RepoState | None = None
         self.g: graph.Graph | None = None
         self.cells: list[list[tuple[int, str]]] = []
@@ -282,35 +281,56 @@ class MapScreen(Screen):
         self.held: str | None = None  # branch picked up with Space, to combine into another
 
     def compose(self) -> ComposeResult:
-        yield Static(id="map-title")
         with ScrollableContainer(id="map-wrap"):
             yield Static(id="map")
         yield Static(id="map-detail")
-        yield Static(graph.LEGEND, id="map-legend")
-        yield Footer()
 
     def on_mount(self) -> None:
-        wrap = self.query_one("#map-wrap")
-        wrap.border_title = "Branch map"
-        wrap.can_focus = False  # arrow keys move the selection, not the scroll
-        self.action_refresh_map()
+        self.border_title = "Branches"
+        self.query_one("#map-wrap").can_focus = False  # arrow keys move the selection, not the scroll
+        self._titles()
+
+    def _titles(self, focused: bool = False) -> None:
+        self.border_subtitle = (graph.LEGEND_SHORT if focused
+                                else "tab: pick a save to branch, switch, combine or undo")
+
+    def on_focus(self) -> None:
+        self._titles(focused=True)
+        self._draw(focused=True)
+
+    def on_blur(self) -> None:
+        self.held = None
+        self._titles(focused=False)
+        self._draw(focused=False)
 
     # ---- state
 
-    def action_refresh_map(self) -> None:
-        self.s = git.state(self.cwd)
-        title = self.query_one("#map-title", Static)
-        if self.s is None:
-            title.update("This folder isn't a git project yet.")
+    def update_state(self, s: git.RepoState | None) -> None:
+        """Called whenever the home screen refreshes. Rebuilds only when branches moved."""
+        self.s = s
+        if s is None or s.head_sha is None:
+            self.g, self.cells, self.sel, self._sig = None, [], None, None
+            self.query_one("#map", Static).update(
+                "[dim]Your branches will show up here after your first save.[/]" if s
+                else "[dim]Start tracking this folder to see branches here.[/]")
             return
-        title.update(f"[b]Your branches[/]  [dim]{escape(self.s.root)}[/]\n{self.s.summary()}")
-        self.g = graph.build(self.s)
-        self.cells = graph.positions(self.g)
-        self.sel = self._find(self.s.head_sha) or next(
-            ((r, 0) for r, c in enumerate(self.cells) if c), None)
+        sig = f"{s.head_sha} {s.branch}\n{git.refs_signature(s.root)}"
+        if sig != self._sig or self.g is None:
+            keep = self.selected()
+            self.g = graph.build(s)
+            self.cells = graph.positions(self.g)
+            self._sig = sig
+            self.sel = ((keep and self._find(keep[1], lane=keep[0].name)) or self._find(s.head_sha)
+                        or next(((r, 0) for r, c in enumerate(self.cells) if c), None))
         self._draw()
 
-    def _find(self, sha: str | None) -> tuple[int, int] | None:
+    def _find(self, sha: str | None, lane: str | None = None) -> tuple[int, int] | None:
+        if lane is not None:
+            for r, cells in enumerate(self.cells):
+                for i, (_, cell_sha) in enumerate(cells):
+                    if cell_sha == sha and self.g.lanes[r].name == lane:
+                        return r, i
+            return None
         for r, cells in enumerate(self.cells):
             for i, (_, cell_sha) in enumerate(cells):
                 if cell_sha == sha and (self.g.lanes[r].commits or self.g.lanes[r].current):
@@ -327,10 +347,11 @@ class MapScreen(Screen):
         r, i = self.sel
         return self.g.lanes[r], self.cells[r][i][1]
 
-    def _draw(self) -> None:
+    def _draw(self, focused: bool | None = None) -> None:
         if self.g is None or self.s is None:
             return
-        cell = (self.sel[0], self.cells[self.sel[0]][self.sel[1]][0]) if self.sel else None
+        focused = self.has_focus if focused is None else focused
+        cell = (self.sel[0], self.cells[self.sel[0]][self.sel[1]][0]) if self.sel and focused else None
         self.query_one("#map", Static).update(graph.render(self.g, self.s, selected=cell, held=self.held))
         self.query_one("#map-detail", Static).update(self._detail())
 
@@ -342,8 +363,8 @@ class MapScreen(Screen):
         if self.held:
             target = (f"Enter brings it into [b]{escape(lane.name)}[/]"
                       if lane.is_branch and lane.name != self.held else "move to another branch's row")
-            return (f"[b black on yellow] Carrying {escape(self.held)} [/]  ↑ ↓ {target}\n"
-                    "[b]enter[/] combine here   [b]esc[/] put it down")
+            return (f"[b black on yellow] Carrying {escape(self.held)} [/]  ↑ ↓ {target} · "
+                    "esc puts it down")
         c = self.g.commit(sha)
         if lane.commits:
             where = "only on GitHub" if c and c.remote_only else f"on {escape(lane.name)}"
@@ -352,15 +373,7 @@ class MapScreen(Screen):
         else:
             head = (f"[b]{escape(lane.name)}[/] starts at “{escape(c.subject) if c else sha[:7]}” "
                     "[dim]and has no saves of its own yet[/]")
-        keys = ["[b]n[/] new branch from here"]
-        if lane.is_branch and not lane.current:
-            keys.append(f"[b]enter[/] switch to {escape(lane.name)}")
-        if lane.is_branch:
-            keys.append(f"[b]space[/] combine {escape(lane.name)} into…")
-        if c and not c.remote_only:
-            keys.append("[b]u[/] undo this save")
-        keys += ["[b]← ↑ ↓ →[/] pick a save", "[b]esc[/] back"]
-        return head + "\n" + "   ".join(keys)
+        return head  # the keys are listed in the footer
 
     def action_move(self, dr: int, dc: int) -> None:
         if self.sel is None:
@@ -378,11 +391,14 @@ class MapScreen(Screen):
             r, i = rr, min(range(len(self.cells[rr])), key=lambda j: abs(self.cells[rr][j][0] - x))
         self.sel = (r, i)
         self._draw()
-        x = self.cells[r][i][0]
+        # Keep the selected cell visible: rows start with a label, then 3 characters per column.
+        label_w = graph.label_width(self.g)
+        cell_x = label_w + 3 * self.cells[r][i][0]
         wrap = self.query_one("#map-wrap")
-        cell_x = 22 + 3 * x  # label width + 3 characters per column
-        if not wrap.scroll_x <= cell_x < wrap.scroll_x + wrap.size.width - 4:
-            wrap.scroll_to(x=max(0, cell_x - wrap.size.width // 2), animate=False)
+        if cell_x + 3 > wrap.scroll_x + wrap.size.width:
+            wrap.scroll_to(x=cell_x + 3 - wrap.size.width, animate=False)
+        elif cell_x < wrap.scroll_x + label_w:
+            wrap.scroll_to(x=max(0, cell_x - label_w), animate=False)
 
     # ---- actions
 
@@ -446,15 +462,14 @@ class MapScreen(Screen):
                      graph.render(after, s, compact=True, unsaved=carrying)),
             save_first=save)
         self.app.log_.event("map_action", action="new_branch", here=here, save_first=save is not None)
-        await self.app.execute(plan)
-        self.action_refresh_map()
+        await self.app.execute(plan)  # refreshes the home screen, map included
 
     def action_back(self) -> None:
         if self.held:
             self.held = None
             self._draw()
         else:
-            self.dismiss(None)
+            self.screen.query_one("#menu").focus()
 
     def action_enter(self) -> None:
         if self.held:
@@ -531,8 +546,7 @@ class MapScreen(Screen):
             save_first=save)
         self.app.log_.event("map_action", action="merge", prediction=status, conflicts=len(files),
                             save_first=save is not None)
-        await self.app.execute(plan)
-        self.action_refresh_map()
+        await self.app.execute(plan)  # refreshes the home screen, map included
 
     @work(exclusive=True, group="map")
     async def action_undo(self) -> None:
@@ -594,8 +608,7 @@ class MapScreen(Screen):
             save_first=save)
         self.app.log_.event("map_action", action="undo", method=method, merge=c.is_merge,
                             pushed=pushed, head=is_head, save_first=save is not None)
-        await self.app.execute(plan)
-        self.action_refresh_map()
+        await self.app.execute(plan)  # refreshes the home screen, map included
 
     @work(exclusive=True, group="map")
     async def switch(self) -> None:
@@ -627,8 +640,7 @@ class MapScreen(Screen):
                      graph.render(after, s, compact=True, unsaved=carrying)),
             save_first=save)
         self.app.log_.event("map_action", action="switch", carrying=carrying, save_first=save is not None)
-        await self.app.execute(plan)
-        self.action_refresh_map()
+        await self.app.execute(plan)  # refreshes the home screen, map included
 
 
 # ----------------------------------------------------------------- main app
@@ -642,7 +654,9 @@ class Gitly(App):
     #banner { margin: 1 2 0 2; padding: 0 1; height: auto; background: $warning 20%; display: none; }
     #banner.show { display: block; }
     #body { height: 1fr; padding: 1 2; }
-    #files { width: 1fr; height: 100%; border: round $panel; padding: 0 1; }
+    #left { width: 1fr; height: 100%; }
+    #files { height: auto; max-height: 40%; border: round $panel; padding: 0 1; }
+    #branchmap { height: 1fr; }
     #menu { width: 46; height: 100%; border: round $accent; }
     ModalScreen { align: center middle; background: $background 60%; }
     .dialog { width: 64; max-width: 95%; height: auto; max-height: 90%;
@@ -663,7 +677,6 @@ class Gitly(App):
     """
     BINDINGS = [
         Binding("question_mark", "ask", "Ask in plain English"),
-        Binding("m", "map", "Branch map"),
         Binding("r", "refresh", "Refresh"),
         Binding("q", "quit", "Quit"),
     ]
@@ -682,13 +695,17 @@ class Gitly(App):
         yield Static(id="summary")
         yield Static(id="banner")
         with Horizontal(id="body"):
-            yield VerticalScroll(Static(id="filelist"), id="files")
+            with Vertical(id="left"):
+                yield VerticalScroll(Static(id="filelist"), id="files")
+                yield BranchMap(id="branchmap")
             yield OptionList(id="menu")
         yield Footer()
 
     def on_mount(self) -> None:
         self.log_.event("start", cwd=self.cwd, ai_available=ai.available(), model=ai.MODEL)
-        self.home.query_one("#files").border_title = "Changes"
+        files = self.home.query_one("#files")
+        files.border_title = "Changes"
+        files.can_focus = False  # Tab moves between the menu and the branch map
         self.home.query_one("#menu").border_title = "What do you want to do?"
         self.refresh_state()
         self.home.query_one("#menu").focus()
@@ -722,6 +739,7 @@ class Gitly(App):
             files.update("[dim]Nothing tracked yet.[/]")
             self._set_menu([("init", "Start tracking this folder"), None,
                             ("ask", "Ask in plain English  [dim]?[/]"), ("quit", "Quit")], keep_highlight)
+            self.home.query_one(BranchMap).update_state(None)
             return
 
         top.update(f"[b]gitly[/]  [dim]{escape(s.root)}[/]")
@@ -769,7 +787,6 @@ class Gitly(App):
             *([("explain", "What did I change?")] if s.dirty else []),
             ("upload", "Upload to GitHub" + up_hint),
             ("pull", "Get latest" + pull_hint),
-            ("map", "Branch map  [dim]m[/]"),
             ("branches", "Branches…"),
             ("undo", "Undo…"),
             ("history", "History"),
@@ -778,6 +795,7 @@ class Gitly(App):
             menu.append(("connect", "Connect to GitHub…"))
         menu += [None, ("ask", "Ask in plain English  [dim]?[/]"), ("quit", "Quit  [dim]q[/]")]
         self._set_menu(menu, keep_highlight)
+        self.home.query_one(BranchMap).update_state(s)
 
     def _set_menu(self, items: list, keep_highlight: bool) -> None:
         ol = self.home.query_one("#menu", OptionList)
@@ -802,10 +820,6 @@ class Gitly(App):
     def action_ask(self) -> None:
         if self.screen is self.screen_stack[0]:
             self.handle("ask")
-
-    def action_map(self) -> None:
-        if self.screen is self.screen_stack[0] and self.repo is not None:
-            self.handle("map")
 
     def action_refresh(self) -> None:
         self.refresh_state(keep_highlight=True)
@@ -833,8 +847,6 @@ class Gitly(App):
             plan = await self.prepare_save(s)
         elif key == "explain":
             await self.explain_flow(s)
-        elif key == "map":
-            self.push_screen(MapScreen(self.cwd))
         elif key == "upload":
             plan = actions.upload(s)
         elif key == "pull":

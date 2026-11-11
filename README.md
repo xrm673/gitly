@@ -7,18 +7,18 @@ always shows you the exact command before anything runs.
 
 ```
  gitly  ~/projects/my-app
- You're on main. 3 files changed, not saved yet. GitHub has 2 commits you don't.
+ You're on login. 2 files changed, not saved yet. GitHub has 2 commits you don't.
 
- ╭ Changes ──────────────────────╮ ╭ What do you want to do? ───────────╮
- │ modified  app.py              │ │ ❯ Save my work  (3 files)          │
- │ modified  styles.css          │ │   Upload to GitHub                 │
- │ new       README.md           │ │   Get latest  (2 waiting)          │
- │                               │ │   Branches…                        │
- │                               │ │   Undo…                            │
- │                               │ │   History                          │
- │                               │ │   ──────────────────               │
- │                               │ │   Ask in plain English  ?          │
- ╰───────────────────────────────╯ ╰────────────────────────────────────╯
+ ╭ Changes ─────────────────────────────╮ ╭ What do you want to do? ──────╮
+ │ modified  app.py                     │ │ ❯ Save my work  (2 files)     │
+ │ new       login.html                 │ │   What did I change?          │
+ ╰──────────────────────────────────────╯ │   Upload to GitHub            │
+ ╭ Branches ────────────────────────────╮ │   Get latest  (2 waiting)     │
+ │   main    ●──●──●─────●──○──○        │ │   Branches…                   │
+ │ ▶ login         ╰──●──◉ you are here │ │   Undo…                       │
+ │   old-idea      ╰──●                 │ │   History                     │
+ ╰─ tab: pick a save to branch, switch… ╯ │   Ask in plain English  ?     │
+                                          ╰───────────────────────────────╯
 ```
 
 ## Install
@@ -60,15 +60,17 @@ a risk level. You see the plan and confirm it before anything runs.
 | careful | `pull`, `reset --soft`, `branch --delete` | Enter runs it, marked yellow |
 | risky | `reset --hard`, `push --force`, `clean` | You type `yes`; gitly saves a backup first |
 
-**Branch map.** Press `m` (or choose **Branch map**) to see your branches as a
-simple picture: one row per branch, left = older, right = newer, starting from
-the save it grew out of. It shows where you are, your unsaved changes, which
-saves are only on GitHub (hollow dots) or not uploaded yet, and branches that
-were already combined into main. It's a simplified view, not a full commit
-graph: each branch shows its last few saves of its own. See `gitly/graph.py`.
+**Branch map.** The home screen shows your branches as a simple picture,
+under your changed files: one row per branch, left = older, right = newer,
+starting from the save it grew out of. It shows where you are, your unsaved
+changes, which saves are only on GitHub (hollow dots) or not uploaded yet, and
+branches that were already combined into main. It's a simplified view, not a
+full commit graph: each branch shows its last few saves of its own. See
+`gitly/graph.py`.
 
-You can act on the map directly. Arrow keys pick a save; the line below the
-map says what it is and which keys apply.
+Press `Tab` to move from the menu to the map (and `Esc` to go back). Arrow
+keys then pick a save; the line under the map says what it is, and the footer
+lists the keys.
 
 - `n` starts a new branch from the selected save.
 - `Enter` switches to the selected branch.

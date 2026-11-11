@@ -409,6 +409,11 @@ def _note(lane: Lane, g: Graph, s: RepoState, unsaved: int, compact: bool) -> st
     return " [dim]·[/] ".join(parts)
 
 
+def label_width(g: Graph) -> int:
+    """Characters taken by the branch names at the start of each row."""
+    return min(max((len(l.name) for l in g.lanes), default=0) + 2, 20)
+
+
 def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
            compact: bool = False, unsaved: int | None = None, held: str | None = None) -> str:
     """The map as Rich markup, one line per lane.
@@ -454,7 +459,7 @@ def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
             glyph[r][start - 1] = "┄"
             link[r][start - 1] = "┄┄"
 
-    width = min(max(len(l.name) for l in g.lanes) + 2, 20)
+    width = label_width(g)
     lines = []
     for r, lane in enumerate(g.lanes):
         name = lane.name if len(lane.name) <= width - 2 else lane.name[: width - 3] + "…"
@@ -484,5 +489,6 @@ def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
     return "\n".join(lines)
 
 
+LEGEND_SHORT = "● save  ◆ combined  ○ only on GitHub  ◉ you"
 LEGEND = ("[dim]● a save   ◆ two branches combined   ○ on GitHub only   "
           "◉ where you are   ┄ older saves   left = older, right = newer[/]")

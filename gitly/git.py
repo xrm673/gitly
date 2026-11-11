@@ -233,6 +233,11 @@ def state(cwd: str | Path) -> RepoState | None:
     )
 
 
+def refs_signature(cwd: str | Path) -> str:
+    """Changes whenever any branch (local or GitHub's copy) moves."""
+    return run(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/remotes"], cwd).stdout
+
+
 def branches(cwd: str | Path) -> list[str]:
     r = run(["branch", "--format=%(refname:short)"], cwd)
     return [b for b in r.stdout.splitlines() if b]

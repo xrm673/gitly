@@ -244,21 +244,41 @@ async def test_precheck_cancel_saves_nothing(repo):
     assert not (repo / ".gitignore").exists()
 
 
-async def test_branch_map_opens_and_closes(repo):
-    from gitly.app import MapScreen
+async def test_branch_map_on_home_screen(repo):
+    from gitly.app import BranchMap
 
     sh(repo, "switch", "-qc", "login")
     (repo / "l.txt").write_text("x"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "login form")
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.press("m")
         await pilot.pause()
-        assert isinstance(app.screen, MapScreen)
-        text = str(app.screen.query_one("#map").render())
-        assert "login" in text and "you are here" in text
+        bm = app.query_one(BranchMap)
+        text = str(bm.query_one("#map").render())
+        assert "login" in text and "you are here" in text  # visible without opening anything
+        assert app.focused.id == "menu" and not bm.query_one("#map-detail").display
+        await pilot.press("tab")
+        assert app.focused is bm and bm.query_one("#map-detail").display
         await pilot.press("escape")
-        await pilot.pause()
-        assert app.screen is app.screen_stack[0]
+        assert app.focused.id == "menu"
+        menu = app.query_one("#menu")
+        assert "map" not in [menu.get_option_at_index(i).id for i in range(menu.option_count)]
+
+
+async def test_branch_map_keeps_selection_on_refresh(repo):
+    from gitly.app import BranchMap
+
+    (repo / "b.txt").write_text("b"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "second")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        bm = await _open_map(pilot)
+        await pilot.press("left")
+        picked = bm.selected()[1]
+        built = bm.g
+        app.refresh_state(keep_highlight=True)  # nothing moved: no rebuild
+        assert bm.g is built and bm.selected()[1] == picked
+        sh(repo, "branch", "other")  # a branch appears: rebuild, selection stays put
+        app.refresh_state(keep_highlight=True)
+        assert bm.g is not built and bm.selected()[1] == picked
 
 
 async def wait_for(pilot, cls, tries=60):
@@ -270,14 +290,11 @@ async def wait_for(pilot, cls, tries=60):
 
 
 async def test_map_new_branch_from_older_save(repo):
-    from gitly.app import MapScreen
-
     (repo / "b.txt").write_text("b"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "second")
     first = sh(repo, "rev-parse", "HEAD~1").strip()
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.press("m")
-        screen = await wait_for(pilot, MapScreen)
+        screen = await _open_map(pilot)
         assert screen.selected()[1] == sh(repo, "rev-parse", "HEAD").strip()  # starts at HEAD
         await pilot.press("left")
         assert screen.selected()[1] == first
@@ -290,7 +307,7 @@ async def test_map_new_branch_from_older_save(repo):
         preview = str(plan_screen.query_one(".preview").render())
         assert "Now" in preview and "After" in preview and "new branch" in preview
         await pilot.press("enter")
-        await wait_for(pilot, MapScreen)
+        await _wait_home(pilot)
         await app.workers.wait_for_complete()
         await pilot.pause()
         assert "old-idea" in str(screen.query_one("#map").render())
@@ -299,16 +316,13 @@ async def test_map_new_branch_from_older_save(repo):
 
 
 async def test_map_switch_carries_unsaved_changes(repo):
-    from gitly.app import MapScreen
-
     sh(repo, "switch", "-qc", "login")
     (repo / "l.txt").write_text("l"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "login form")
     sh(repo, "switch", "-q", "main")
     (repo / "notes.txt").write_text("unsaved\n")
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.press("m")
-        screen = await wait_for(pilot, MapScreen)
+        screen = await _open_map(pilot)
         await pilot.press("down")
         assert screen.selected()[0].name == "login"
         await pilot.press("enter")
@@ -316,14 +330,14 @@ async def test_map_switch_carries_unsaved_changes(repo):
         assert [st.args for st in plan_screen.plan.steps] == [["switch", "login"]]
         assert "comes with you" in plan_screen.plan.steps[0].why
         await pilot.press("enter")
-        await wait_for(pilot, MapScreen)
+        await _wait_home(pilot)
         await app.workers.wait_for_complete()
     assert sh(repo, "branch", "--show-current").strip() == "login"
     assert (repo / "notes.txt").read_text() == "unsaved\n"
 
 
 async def test_map_switch_saves_first_when_in_the_way(repo):
-    from gitly.app import ChooseScreen, MapScreen
+    from gitly.app import ChooseScreen
 
     sh(repo, "switch", "-qc", "login")
     (repo / "a.txt").write_text("login version\n"); sh(repo, "commit", "-qam", "login edit")
@@ -331,8 +345,7 @@ async def test_map_switch_saves_first_when_in_the_way(repo):
     (repo / "a.txt").write_text("my unsaved edit\n")
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.press("m")
-        await wait_for(pilot, MapScreen)
+        await _open_map(pilot)
         await pilot.press("down", "enter")
         choose_screen = await wait_for(pilot, ChooseScreen)
         assert "a.txt" in str(choose_screen.query("Static")[1].render())
@@ -342,7 +355,7 @@ async def test_map_switch_saves_first_when_in_the_way(repo):
         plan_screen = await wait_for(pilot, PlanScreen)
         assert [st.args[0] for st in plan_screen.plan.steps] == ["add", "commit", "switch"]
         await pilot.press("enter")
-        await wait_for(pilot, MapScreen)
+        await _wait_home(pilot)
         await app.workers.wait_for_complete()
     assert sh(repo, "branch", "--show-current").strip() == "login"
     assert sh(repo, "log", "-1", "--format=%s", "main").strip() == "my edit"
@@ -350,18 +363,15 @@ async def test_map_switch_saves_first_when_in_the_way(repo):
 
 
 async def test_map_rejects_bad_names_and_remote_rows(repo):
-    from gitly.app import MapScreen
-
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.press("m")
-        await wait_for(pilot, MapScreen)
+        await _open_map(pilot)
         await pilot.press("enter")  # already on main
         await pilot.pause()
         await pilot.press("n")
         await wait_for(pilot, AskTextScreen)
         await pilot.press(*"main", "enter")  # exists
-        await wait_for(pilot, MapScreen)
+        await _wait_home(pilot)
         await app.workers.wait_for_complete()
     assert sh(repo, "branch", "--format=%(refname:short)").split() == ["main"]
 
@@ -373,15 +383,26 @@ def _login_branch(repo, path="l.txt", text="l\n"):
 
 
 async def _open_map(pilot):
-    from gitly.app import MapScreen
-    await pilot.press("m")
-    return await wait_for(pilot, MapScreen)
+    """Focus the branch map panel on the home screen."""
+    from gitly.app import BranchMap
+    await pilot.pause()
+    await pilot.press("tab")
+    bm = pilot.app.query_one(BranchMap)
+    assert pilot.app.focused is bm
+    return bm
+
+
+async def _wait_home(pilot, tries=60):
+    for _ in range(tries):
+        await pilot.pause(0.05)
+        if pilot.app.screen is pilot.app.screen_stack[0]:
+            return
+    raise AssertionError(f"still on {type(pilot.app.screen).__name__}")
 
 
 async def _run_plan_and_return(pilot):
-    from gitly.app import MapScreen
     await pilot.press("enter")
-    await wait_for(pilot, MapScreen)
+    await _wait_home(pilot)
     await pilot.app.workers.wait_for_complete()
     await pilot.pause()
 
@@ -434,17 +455,16 @@ async def test_map_combine_predicts_conflict(repo):
 
 
 async def test_map_esc_puts_branch_down(repo):
-    from gitly.app import MapScreen
     _login_branch(repo)
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await _open_map(pilot)
         await pilot.press("down", "space", "escape")
         await pilot.pause()
-        assert screen.held is None and isinstance(app.screen, MapScreen)
+        assert screen.held is None and app.focused is screen  # first Esc puts it down
         await pilot.press("escape")
         await pilot.pause()
-        assert app.screen is app.screen_stack[0]
+        assert app.focused.id == "menu"
 
 
 async def test_map_undo_latest_unpushed_save(repo):
