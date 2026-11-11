@@ -11,6 +11,9 @@ os.environ.update({
     "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@example.com",
     "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@example.com",
 })
+# Never reach the real AI from tests, even if the developer has a key set.
+for _k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "GITLY_AI_SEND_CODE"):
+    os.environ.pop(_k, None)
 
 
 def sh(cwd, *args):

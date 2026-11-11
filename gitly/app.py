@@ -195,9 +195,13 @@ class TextScreen(ModalScreen):
 
 
 class ThinkingScreen(ModalScreen):
+    def __init__(self, doing: str = "asking the AI for a plan"):
+        super().__init__()
+        self.doing = doing
+
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
-            yield Static("[b]Thinking…[/]  asking the AI for a plan", classes="dialog-title")
+            yield Static(f"[b]Thinking…[/]  {escape(self.doing)}", classes="dialog-title")
             yield LoadingIndicator()
 
 
@@ -334,6 +338,7 @@ class Gitly(App):
         pull_hint = f"  [dim]({s.behind} waiting)[/]" if s.behind else ""
         menu += [
             ("save", "Save my work" + save_hint),
+            *([("explain", "What did I change?")] if s.dirty else []),
             ("upload", "Upload to GitHub" + up_hint),
             ("pull", "Get latest" + pull_hint),
             ("branches", "Branches…"),
@@ -392,11 +397,23 @@ class Gitly(App):
             if not s.dirty:
                 self.notify("Nothing to save: no changes since your last save.")
                 return
+            suggestion = ""
+            if ai.available():
+                suggestion = await self.with_ai(
+                    ai.suggest_commit_message, s, doing="writing a description of your changes",
+                    event="ai_commit_message") or ""
+            hint = "Describe what you changed in a few words. This label helps you find this save later."
+            if suggestion:
+                hint = "The AI suggested this from your changes. Edit it, or press Enter to keep it."
             msg = await self.push_screen_wait(AskTextScreen(
-                "Save my work", placeholder="e.g. add login page",
-                hint="Describe what you changed in a few words. This label helps you find this save later."))
+                "Save my work", placeholder="e.g. add login page", hint=hint, value=suggestion))
+            if suggestion:
+                self.log_.event("ai_commit_message_choice",
+                                choice="cancelled" if not msg else "kept" if msg == suggestion else "edited")
             if msg:
                 plan = actions.save_work(s, msg)
+        elif key == "explain":
+            await self.explain_flow(s)
         elif key == "upload":
             plan = actions.upload(s)
         elif key == "pull":
@@ -482,12 +499,44 @@ class Gitly(App):
             hint="Create an empty repository on github.com, then paste its URL here."))
         return actions.connect_remote(url) if url else None
 
+    async def ai_setup_help(self) -> None:
+        await self.push_screen_wait(TextScreen("AI isn't set up", (
+            "To use the AI features, set an Anthropic API key:\n\n"
+            "  [b]export ANTHROPIC_API_KEY=sk-ant-...[/]\n\n"
+            "then restart gitly. Everything else works without it.")))
+
+    async def with_ai(self, fn, *args, doing: str, event: str):
+        """Run one AI call behind a "Thinking…" dialog. Returns its result, or None on failure."""
+        self.push_screen(ThinkingScreen(doing))
+        try:
+            result, tel = await asyncio.to_thread(fn, *args)
+        except ai.AIUnavailable as e:
+            self.log_.event("ai_error", feature=event, message=str(e))
+            self.notify(str(e), severity="error", timeout=8)
+            return None
+        finally:
+            self.pop_screen()
+        self.log_.event(event, **tel)
+        return result
+
+    async def explain_flow(self, s: git.RepoState) -> None:
+        if not ai.available():
+            await self.ai_setup_help()
+            return
+        summary = await self.with_ai(ai.summarize_changes, s, doing="reading your changes",
+                                     event="ai_summary")
+        if summary is None:
+            return
+        body = escape(summary.overview)
+        if summary.points:
+            body += "\n\n" + "\n".join(f"• {escape(p)}" for p in summary.points)
+        if not ai.shares_code():
+            body += "\n\n[dim]Based on file names only (GITLY_AI_SEND_CODE=0).[/]"
+        await self.push_screen_wait(TextScreen("What did I change?", body))
+
     async def ask_flow(self, preset: str = "", error: str | None = None) -> None:
         if not ai.available():
-            await self.push_screen_wait(TextScreen("AI isn't set up", (
-                "To use plain-English requests, set an Anthropic API key:\n\n"
-                "  [b]export ANTHROPIC_API_KEY=sk-ant-...[/]\n\n"
-                "then restart gitly. Everything else works without it.")))
+            await self.ai_setup_help()
             return
         if self.repo is None:
             self.notify("Start tracking this folder first.", severity="warning")
@@ -499,17 +548,10 @@ class Gitly(App):
         if not q:
             return
         self.log_.event("ai_ask", question=q, with_error=error is not None)
-        self.push_screen(ThinkingScreen())
-        try:
-            plan, tel = await asyncio.to_thread(ai.ask, q, self.repo, error)
-        except ai.AIUnavailable as e:
-            self.pop_screen()
-            self.log_.event("ai_error", message=str(e))
-            self.notify(str(e), severity="error", timeout=8)
-            return
-        self.pop_screen()
-        self.log_.event("ai_plan", **tel)
-        await self.execute(plan)
+        plan = await self.with_ai(ai.ask, q, self.repo, error, doing="asking the AI for a plan",
+                                  event="ai_plan")
+        if plan is not None:
+            await self.execute(plan)
 
     # ---- running plans
 

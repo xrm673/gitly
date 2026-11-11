@@ -122,3 +122,78 @@ async def test_not_a_repo_offers_init(tmp_path):
         await app.workers.wait_for_complete()
         await pilot.pause()
     assert (tmp_path / ".git").is_dir()
+
+
+async def test_save_prefills_ai_message(repo, tmp_path, monkeypatch):
+    from gitly import ai
+
+    monkeypatch.setenv("GITLY_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(ai, "available", lambda: True)
+    monkeypatch.setattr(ai, "suggest_commit_message", lambda s: ("Update a.txt", {"model": "m"}))
+    (repo / "a.txt").write_text("edited\n")
+    app = Gitly(str(repo), participant="P02")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await choose(pilot, "save")
+        for _ in range(50):
+            await pilot.pause(0.05)
+            if isinstance(app.screen, AskTextScreen):
+                break
+        assert app.screen.query_one("Input").value == "Update a.txt"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, PlanScreen)
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+    assert sh(repo, "log", "-1", "--format=%s").strip() == "Update a.txt"
+    lines = [json.loads(l) for l in next((tmp_path / "logs").iterdir()).read_text().splitlines()]
+    assert {"event": "ai_commit_message_choice", "choice": "kept"}.items() <= next(
+        e for e in lines if e["event"] == "ai_commit_message_choice").items()
+
+
+async def test_save_falls_back_when_ai_fails(repo, monkeypatch):
+    from gitly import ai
+
+    def boom(s):
+        raise ai.AIUnavailable("Couldn't reach the AI service.")
+
+    monkeypatch.setattr(ai, "available", lambda: True)
+    monkeypatch.setattr(ai, "suggest_commit_message", boom)
+    (repo / "a.txt").write_text("edited\n")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await choose(pilot, "save")
+        for _ in range(50):
+            await pilot.pause(0.05)
+            if isinstance(app.screen, AskTextScreen):
+                break
+        assert isinstance(app.screen, AskTextScreen)
+        assert app.screen.query_one("Input").value == ""
+
+
+async def test_explain_changes(repo, monkeypatch):
+    from gitly import ai
+    from gitly.app import TextScreen
+
+    monkeypatch.setattr(ai, "available", lambda: True)
+    monkeypatch.setattr(ai, "summarize_changes", lambda s: (
+        ai.ChangeSummary(overview="You rewrote a.txt.", points=["Replaced [one] with edited"]), {}))
+    (repo / "a.txt").write_text("edited\n")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await choose(pilot, "explain")
+        for _ in range(50):
+            await pilot.pause(0.05)
+            if isinstance(app.screen, TextScreen):
+                break
+        assert isinstance(app.screen, TextScreen)
+        text = str(app.screen.query("Static")[1].render())
+        assert "You rewrote a.txt." in text and "[one]" in text  # markup escaped, not eaten
+
+
+async def test_explain_hidden_when_clean(repo):
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        menu = app.query_one("#menu")
+        ids = [menu.get_option_at_index(i).id for i in range(menu.option_count)]
+        assert "explain" not in ids and "save" in ids

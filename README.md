@@ -46,7 +46,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 export GITLY_MODEL=claude-haiku-5-5   # optional; this is the default
 ```
 
-Everything except the Ask box works without a key.
+Everything except the AI features works without a key.
 
 ## How it works
 
@@ -70,6 +70,21 @@ unsaved changes in the way, no remote, auth failure, missing name/email,
 nothing to commit) and offers a one-click fix. Anything it doesn't recognize
 can be sent to the AI along with the error output.
 
+**AI save descriptions.** With a key set, **Save my work** reads your unsaved
+changes and pre-fills a one-line description. Edit it or press Enter to keep it.
+If the AI is unreachable, the box is simply empty and you type your own.
+
+**What did I change?** Shows up in the menu whenever you have unsaved changes.
+It gives a plain-English summary of the changes and flags anything that looks
+accidental (leftover debug code, a deleted feature, a secrets file).
+
+**What gets sent to the AI.** Both features send the unsaved diff to the
+Anthropic API: tracked edits plus new files, capped at about 3,000 characters
+per file and 12,000 in total. Files that look like secrets (`.env*`, `*.pem`,
+`*.key`, `id_rsa`, `.npmrc`, `credentials.json`, …) are listed by name only;
+their contents are never sent. Set `GITLY_AI_SEND_CODE=0` to send file names
+only, with no contents at all. See `working_diff()` in `gitly/git.py`.
+
 **AI guardrails.** The model returns structured JSON (a list of git argument
 lists), never shell text. Commands run without a shell. gitly refuses
 non-git commands, global options like `-c`/`-C`, interactive or editor flags,
@@ -85,7 +100,8 @@ gitly --study P07
 writes one JSON event per line to `~/.gitly/logs/P07-<timestamp>.jsonl`: menu
 choices, plans shown, whether they were run or cancelled, each command's exit
 code and duration, failures and which rescue was offered, AI questions, latency
-and token counts. File contents are never logged and nothing is uploaded.
+and token counts, and whether an AI-suggested save description was kept, edited
+or cancelled. File contents are never logged and nothing is uploaded.
 Override the folder with `GITLY_LOG_DIR`.
 
 ## Code map
@@ -97,7 +113,7 @@ Override the folder with `GITLY_LOG_DIR`.
 | `gitly/actions.py` | The no-AI menu plans |
 | `gitly/rescue.py` | Error pattern → explanation + fixes |
 | `gitly/safety.py` | Risk levels and blocked commands |
-| `gitly/ai.py` | Plain-English request → structured plan (Anthropic API) |
+| `gitly/ai.py` | AI features (Anthropic API): Ask → plan, save descriptions, change summaries |
 | `gitly/studylog.py` | Opt-in JSONL event log |
 
 ## Tests

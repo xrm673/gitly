@@ -56,3 +56,39 @@ def test_schema_is_accepted_by_sdk():
     from anthropic.lib._parse._transform import transform_schema
     schema = transform_schema(ai.AIPlan.model_json_schema())
     assert schema["additionalProperties"] is False
+
+
+def test_commit_message_sends_diff_and_cleans_reply(repo, monkeypatch):
+    (repo / "a.txt").write_text("two\n")
+    msgs = fake_client(monkeypatch, ai.CommitMessage(message='"Change a.txt to two"\nextra line'))
+    msg, tel = ai.suggest_commit_message(git.state(repo))
+    assert msg == "Change a.txt to two"
+    kw = msgs.calls[0]
+    assert kw["output_format"] is ai.CommitMessage and kw["system"] == ai.COMMIT_SYSTEM
+    assert "+two" in kw["messages"][0]["content"]
+    assert tel["input_tokens"] == 10
+
+
+def test_commit_message_empty_reply(repo, monkeypatch):
+    (repo / "a.txt").write_text("two\n")
+    fake_client(monkeypatch, ai.CommitMessage(message="  "))
+    with pytest.raises(ai.AIUnavailable, match="Type your own"):
+        ai.suggest_commit_message(git.state(repo))
+
+
+def test_summary_respects_opt_out(repo, monkeypatch):
+    (repo / "a.txt").write_text("two\n")
+    monkeypatch.setenv("GITLY_AI_SEND_CODE", "0")
+    msgs = fake_client(monkeypatch, ai.ChangeSummary(
+        overview="You edited a.txt.", points=["Changed the text", " ", *[f"p{i}" for i in range(9)]]))
+    out, _ = ai.summarize_changes(git.state(repo))
+    content = msgs.calls[0]["messages"][0]["content"]
+    assert "+two" not in content and "not shared" in content
+    assert "a.txt" in content  # file names still come through repo_state
+    assert out.points[0] == "Changed the text" and len(out.points) == 6
+
+
+def test_new_schemas_are_accepted_by_sdk():
+    from anthropic.lib._parse._transform import transform_schema
+    for model in (ai.CommitMessage, ai.ChangeSummary):
+        assert transform_schema(model.model_json_schema())["additionalProperties"] is False

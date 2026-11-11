@@ -61,3 +61,37 @@ def test_no_editor_hang(repo):
     (repo / "a.txt").write_text("x\n"); sh(repo, "add", ".")
     r = git.run(["commit"], repo, timeout=10)
     assert not r.ok and r.code != 124
+
+
+def test_working_diff_includes_edits_and_new_files(repo):
+    (repo / "a.txt").write_text("two\n")
+    (repo / "new.py").write_text("print('hi')\n")
+    d = git.working_diff(git.state(repo))
+    assert "-one" in d and "+two" in d
+    assert "b/new.py" in d and "+print('hi')" in d
+
+
+def test_working_diff_hides_secret_files(repo):
+    (repo / ".env").write_text("API_KEY=sk-super-secret\n")
+    (repo / "config").mkdir()
+    (repo / "config" / "id_rsa").write_text("PRIVATE\n")
+    d = git.working_diff(git.state(repo))
+    assert "sk-super-secret" not in d and "PRIVATE" not in d
+    assert d.count("contents not shared") == 2
+
+
+def test_working_diff_truncates(repo):
+    for i in range(5):
+        (repo / f"big{i}.txt").write_text("x\n" * 5000)
+    d = git.working_diff(git.state(repo), max_chars=5000, per_file=2000)
+    assert len(d) < 5000 + 200
+    assert "rest of this file's changes left out" in d and "more file(s) left out" in d
+
+
+def test_working_diff_before_first_commit(tmp_path):
+    sh(tmp_path, "init", "-q", "-b", "main")
+    (tmp_path / "a.txt").write_text("hello\n")
+    sh(tmp_path, "add", "a.txt")
+    (tmp_path / "b.txt").write_text("world\n")
+    d = git.working_diff(git.state(tmp_path))
+    assert "+hello" in d and "+world" in d

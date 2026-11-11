@@ -7,6 +7,7 @@ the user is exactly the command that runs.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -228,6 +229,54 @@ def branches(cwd: str | Path) -> list[str]:
 def recent_log(cwd: str | Path, n: int = 20) -> list[str]:
     r = run(["log", f"-{n}", "--format=%h  %ar  %an  %s"], cwd)
     return r.stdout.splitlines() if r.ok else []
+
+
+# Files whose contents must never leave the machine. The AI sees only their names.
+SENSITIVE = re.compile(
+    r"(^|/)(\.env(\..*)?|.*\.(pem|key|p12|pfx|keystore)|id_(rsa|dsa|ecdsa|ed25519)"
+    r"|\.npmrc|\.pypirc|\.netrc|credentials(\.json)?|secrets?\.(json|ya?ml|toml))$",
+    re.IGNORECASE,
+)
+
+
+def _patch_chunks(patch: str) -> list[str]:
+    return [c for c in re.split(r"(?m)^(?=diff --git )", patch) if c.startswith("diff --git ")]
+
+
+def _chunk_path(chunk: str) -> str:
+    header = chunk.split("\n", 1)[0]
+    return header.rsplit(" b/", 1)[-1].strip('"')
+
+
+def working_diff(s: RepoState, max_chars: int = 12000, per_file: int = 3000) -> str:
+    """What a save would include (tracked edits + new files) as a patch, for the AI.
+
+    Contents of secret-looking files are replaced by a one-line note, each file
+    is capped at `per_file` characters, and the whole thing at `max_chars`.
+    """
+    base = s.head_sha or run(["hash-object", "-t", "tree", "/dev/null"], s.root).stdout.strip()
+    chunks = _patch_chunks(run(["diff", "--no-ext-diff", "--no-textconv", "-M", base], s.root).stdout)
+    for path in s.untracked:
+        if len(chunks) >= 60:
+            break
+        # --no-index exits 1 when the files differ, which is always the case here
+        r = run(["diff", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", path], s.root)
+        chunks += _patch_chunks(r.stdout)
+
+    out: list[str] = []
+    used = 0
+    for i, chunk in enumerate(chunks):
+        path = _chunk_path(chunk)
+        if SENSITIVE.search(path):
+            chunk = f"diff --git a/{path} b/{path}\n[contents not shared: looks like a secrets file]\n"
+        elif len(chunk) > per_file:
+            chunk = chunk[:per_file] + "\n[... rest of this file's changes left out]\n"
+        if used + len(chunk) > max_chars:
+            out.append(f"[... {len(chunks) - i} more file(s) left out to keep this short]")
+            break
+        out.append(chunk)
+        used += len(chunk)
+    return "".join(out).strip()
 
 
 BACKUP_NS = "refs/gitly/backup"
