@@ -877,3 +877,28 @@ async def test_finish_merge_after_fixing_markers(repo):
         await pilot.pause()
     assert not git.state(repo).merging
     assert sh(repo, "log", "-1", "--format=%P").count(" ") == 1
+
+
+async def test_finish_rebase_continues_it(repo):
+    _login_branch(repo, "a.txt", "login version\n")
+    sh(repo, "switch", "-q", "login")
+    (repo / "b.txt").write_text("b\n"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "login second")
+    sh(repo, "switch", "-q", "main")
+    (repo / "a.txt").write_text("main version\n"); sh(repo, "commit", "-qam", "main edit")
+    sh(repo, "switch", "-q", "login")
+    assert not git.run(["rebase", "main"], repo).ok
+    (repo / "a.txt").write_text("both versions\n")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        menu = app.query_one("#menu")
+        ids = [menu.get_option_at_index(i).id for i in range(menu.option_count)]
+        assert "finish_merge" in ids and "branch_here" not in ids
+        await choose(pilot, "finish_merge")
+        plan_screen = await wait_for(pilot, PlanScreen)
+        assert [st.args for st in plan_screen.plan.steps] == [["add", "--all"], ["rebase", "--continue"]]
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+    s = git.state(repo)
+    assert not s.rebasing and s.branch == "login"
+    assert sh(repo, "log", "--format=%s").splitlines() == ["login second", "login form", "main edit", "first"]

@@ -848,7 +848,7 @@ class Gitly(App):
         if s.conflicts or s.merging or s.rebasing or s.reverting:
             menu += [("finish_merge", "[b]I fixed the conflicts, finish[/]"),
                      ("abort_merge", "Cancel combining"), None]
-        if s.detached:
+        if s.detached and not s.rebasing:  # a rebase always runs on a detached HEAD
             menu += [("branch_here", "[b]Make a branch here[/]"),
                      ("back_to_branch", "Go back to my branch"), None]
         n = len(seen) + len(s.untracked)
@@ -1072,7 +1072,7 @@ class Gitly(App):
         elif key == "connect":
             return await self.connect_flow()
         elif key == "finish_merge":
-            return actions.finish_merge()
+            return actions.finish_merge(s)
         elif key == "abort_merge":
             return actions.abort_merge(s)
         elif key == "branch_here":

@@ -53,7 +53,7 @@ def _conflict(r: Result, s: RepoState) -> Rescue:
         f"Both sides edited the same lines in: {files}. Git marked the spots with "
         "<<<<<<< and >>>>>>>. Open those files (or ask your AI editor), keep the "
         "right version, delete the markers, then come back and finish.",
-        [actions.finish_merge(), actions.abort_merge(s)],
+        [actions.finish_merge(s), actions.abort_merge(s)],
     )
 
 
