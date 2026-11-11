@@ -152,3 +152,19 @@ def test_revert_in_progress_is_detected(repo):
     assert "undoing a save" in s.summary()
     from gitly import actions
     assert actions.abort_merge(s).steps[0].args == ["revert", "--abort"]
+
+
+def test_tidy_branch_name(repo):
+    cases = {
+        "Login stuff!": "login-stuff",
+        "  fix the Footer on mobile ": "fix-the-footer-on-mobile",
+        "feature//New..Thing": "feature/new.thing",
+        "café menu": "cafe-menu",
+        "a.lock": "a",
+        "--x--": "x",
+        "!!!": "",
+    }
+    for typed, want in cases.items():
+        got = git.tidy_branch_name(typed)
+        assert got == want, typed
+        assert not got or git.valid_branch_name(repo, got)

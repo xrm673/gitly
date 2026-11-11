@@ -123,6 +123,15 @@ can be sent to the AI along with the error output.
 changes and pre-fills a one-line description. Edit it or press Enter to keep it.
 If the AI is unreachable, the box is simply empty and you type your own.
 
+**AI branch names.** When you start a branch (menu or map), type a rough name
+or a few words, like "fix the footer on phones". The AI turns it into a proper
+branch name (`fix/footer-on-phones`): it keeps your words, follows the repo's
+prefix style if it has one, and uses your unsaved changes only when they're
+about the same thing. You see the suggestion next to what you typed and can
+edit it; if it's the same as yours, gitly doesn't ask twice. Without a key, or
+if the AI is down, gitly just tidies what you typed (`Login stuff!` →
+`login-stuff`). A suggestion that matches an existing branch is ignored.
+
 **What did I change?** Shows up in the menu whenever you have unsaved changes.
 It gives a plain-English summary of the changes and flags anything that looks
 accidental (leftover debug code, a deleted feature, a secrets file).

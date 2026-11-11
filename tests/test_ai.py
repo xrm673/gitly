@@ -92,3 +92,22 @@ def test_new_schemas_are_accepted_by_sdk():
     from anthropic.lib._parse._transform import transform_schema
     for model in (ai.CommitMessage, ai.ChangeSummary):
         assert transform_schema(model.model_json_schema())["additionalProperties"] is False
+
+
+def test_branch_name_sends_typed_text_and_context(repo, monkeypatch):
+    (repo / "footer.css").write_text("footer { display: none }\n")
+    msgs = fake_client(monkeypatch, ai.BranchName(name=' "fix-mobile-footer" ', reason="made it more specific"))
+    out, _ = ai.suggest_branch_name("footer fix", git.state(repo), "where you are", ["main", "login"])
+    assert out.name == "fix-mobile-footer"
+    kw = msgs.calls[0]
+    content = kw["messages"][0]["content"]
+    assert kw["system"] == ai.BRANCH_SYSTEM and kw["output_format"] is ai.BranchName
+    assert "<typed>\nfooter fix\n</typed>" in content
+    assert "login" in content and "where you are" in content
+    assert "display: none" in content  # unsaved changes give it context
+
+
+def test_branch_name_skips_diff_when_clean(repo, monkeypatch):
+    msgs = fake_client(monkeypatch, ai.BranchName(name="x", reason="kept"))
+    ai.suggest_branch_name("x", git.state(repo), "where you are", [])
+    assert "<changes>" not in msgs.calls[0]["messages"][0]["content"]

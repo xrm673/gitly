@@ -11,6 +11,7 @@ import re
 import shlex
 import subprocess
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -283,6 +284,17 @@ def predict_merge(root: str | Path, target: str, source: str) -> tuple[str, list
     if r.code == 1:
         return "conflict", [p for p in r.stdout.splitlines()[1:] if p]
     return "unknown", []
+
+
+def tidy_branch_name(text: str) -> str:
+    """Best-effort valid branch name from whatever was typed: "Login stuff!" -> "login-stuff"."""
+    ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    out = re.sub(r"[^a-z0-9/._-]+", "-", ascii_text.strip().lower())
+    out = re.sub(r"-{2,}", "-", re.sub(r"\.{2,}", ".", out))
+    out = re.sub(r"/{2,}", "/", out)
+    parts = [p.strip("-.") for p in out.split("/")]
+    out = "/".join(p for p in parts if p)
+    return out.removesuffix(".lock")[:60].strip("-./")
 
 
 def valid_branch_name(root: str | Path, name: str) -> bool:

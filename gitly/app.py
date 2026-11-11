@@ -429,18 +429,8 @@ class MapScreen(Screen):
         here = sha == s.head_sha
         c = g.commit(sha)
         label = "where you are" if here else f"the save “{c.subject if c else sha[:7]}”"
-        name = await self.app.push_screen_wait(AskTextScreen(
-            "New branch", placeholder="e.g. dark-mode",
-            hint=f"It starts from {escape(label)}. Pick a short name, no spaces."))
+        name = await self.app.ask_branch_name(s, label)
         if not name:
-            return
-        name = name.strip().replace(" ", "-")
-        if name in git.branches(s.root):
-            self.notify(f"There's already a branch called '{name}'.", severity="warning")
-            return
-        if not git.valid_branch_name(s.root, name):
-            self.notify(f"'{name}' can't be a branch name. Try letters, numbers and dashes.",
-                        severity="warning")
             return
         blocking = [] if here else await asyncio.to_thread(git.unsaved_in_the_way, s, sha)
         ok, save = await self._make_room(blocking, f"{label} has a different version")
@@ -879,10 +869,9 @@ class Gitly(App):
         ], hint=f"You're on [b]{escape(s.branch or 'no branch')}[/]. A branch is a separate line of work."))
         others = [b for b in git.branches(s.root) if b != s.branch]
         if what == "new":
-            name = await self.push_screen_wait(AskTextScreen(
-                "New branch name", placeholder="e.g. dark-mode", hint="Short, no spaces."))
+            name = await self.ask_branch_name(s, "where you are")
             if name:
-                return actions.new_branch(name.replace(" ", "-"))
+                return actions.new_branch(name)
         elif what in ("switch", "delete"):
             if not others:
                 self.notify("There are no other branches.")
@@ -959,6 +948,43 @@ class Gitly(App):
         if not msg:
             return None
         return precheck.save_leaving_out(s, findings, msg) if findings else actions.save_work(s, msg)
+
+    async def ask_branch_name(self, s: git.RepoState, start: str) -> str | None:
+        """Ask for a branch name; the AI tidies up whatever was typed. Returns a valid, unused name."""
+        typed = await self.push_screen_wait(AskTextScreen(
+            "New branch", placeholder="e.g. login page, or fix footer on mobile",
+            hint=f"It starts from {escape(start)}. Type a name or a few words about what it's for"
+                 + (", and the AI will tidy it up." if ai.available() else ".")))
+        if not typed:
+            return None
+        existing = git.branches(s.root)
+        name = git.tidy_branch_name(typed)
+        if ai.available():
+            suggestion = await self.with_ai(ai.suggest_branch_name, typed, s, start, existing,
+                                            doing="tidying up the branch name", event="ai_branch_name")
+            better = git.tidy_branch_name(suggestion.name) if suggestion else ""
+            if (better and better != name and better not in existing
+                    and git.valid_branch_name(s.root, better)):
+                final = await self.push_screen_wait(AskTextScreen(
+                    "New branch", value=better,
+                    hint=(f"You typed “{escape(typed)}”. The AI suggests this "
+                          f"({escape(suggestion.reason.rstrip('.'))}). Edit it, or press Enter to use it.")))
+                self.log_.event("ai_branch_name_choice", choice="cancelled" if not final
+                                else "kept" if final.strip() == better else "edited")
+                if not final:
+                    return None
+                name = git.tidy_branch_name(final)
+        if not name:
+            self.notify("That name has no letters or numbers in it. Try again.", severity="warning")
+            return None
+        if name in existing:
+            self.notify(f"There's already a branch called '{name}'.", severity="warning")
+            return None
+        if not git.valid_branch_name(s.root, name):
+            self.notify(f"'{name}' can't be a branch name. Try letters, numbers and dashes.",
+                        severity="warning")
+            return None
+        return name
 
     async def ai_setup_help(self) -> None:
         await self.push_screen_wait(TextScreen("AI isn't set up", (

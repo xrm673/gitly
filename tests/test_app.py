@@ -507,3 +507,88 @@ async def test_map_undo_refuses_other_branch(repo):
         await app.workers.wait_for_complete()
         assert not isinstance(app.screen, PlanScreen)
     assert sh(repo, "log", "-1", "--format=%s", "login").strip() == "login form"
+
+
+async def _new_branch_via_menu(pilot):
+    from gitly.app import ChooseScreen
+    await choose(pilot, "branches")
+    await wait_for(pilot, ChooseScreen)
+    ol = pilot.app.screen.query_one("OptionList")
+    ol.highlighted = ol.get_option_index("new")
+    await pilot.press("enter")
+    await wait_for(pilot, AskTextScreen)
+
+
+async def test_ai_tidies_branch_name(repo, tmp_path, monkeypatch):
+    from gitly import ai
+    monkeypatch.setenv("GITLY_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(ai, "available", lambda: True)
+    seen = {}
+
+    def suggest(typed, s, start, existing):
+        seen.update(typed=typed, start=start, existing=existing)
+        return ai.BranchName(name="fix-mobile-footer", reason="made it more specific"), {}
+
+    monkeypatch.setattr(ai, "suggest_branch_name", suggest)
+    app = Gitly(str(repo), participant="P03")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _new_branch_via_menu(pilot)
+        await pilot.press(*"footer thing", "enter")
+        for _ in range(60):
+            await pilot.pause(0.05)
+            if isinstance(app.screen, AskTextScreen) and app.screen.query_one("Input").value:
+                break
+        assert app.screen.query_one("Input").value == "fix-mobile-footer"
+        assert "footer thing" in str(app.screen.query(".muted").first().render())
+        await pilot.press("enter")
+        plan_screen = await wait_for(pilot, PlanScreen)
+        assert plan_screen.plan.steps[0].args == ["switch", "--create", "fix-mobile-footer"]
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+    assert seen == {"typed": "footer thing", "start": "where you are", "existing": ["main"]}
+    assert sh(repo, "branch", "--show-current").strip() == "fix-mobile-footer"
+    lines = [json.loads(l) for l in next((tmp_path / "logs").iterdir()).read_text().splitlines()]
+    assert any(e["event"] == "ai_branch_name_choice" and e["choice"] == "kept" for e in lines)
+
+
+async def test_ai_branch_name_same_as_typed_skips_second_prompt(repo, monkeypatch):
+    from gitly import ai
+    monkeypatch.setattr(ai, "available", lambda: True)
+    monkeypatch.setattr(ai, "suggest_branch_name",
+                        lambda *a: (ai.BranchName(name="dark-mode", reason="kept as is"), {}))
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _new_branch_via_menu(pilot)
+        await pilot.press(*"Dark mode", "enter")
+        plan_screen = await wait_for(pilot, PlanScreen)
+        assert plan_screen.plan.steps[0].args == ["switch", "--create", "dark-mode"]
+
+
+async def test_ai_branch_name_falls_back(repo, monkeypatch):
+    from gitly import ai
+
+    def boom(*a):
+        raise ai.AIUnavailable("Couldn't reach the AI service.")
+
+    monkeypatch.setattr(ai, "available", lambda: True)
+    monkeypatch.setattr(ai, "suggest_branch_name", boom)
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _new_branch_via_menu(pilot)
+        await pilot.press(*"Login stuff!", "enter")
+        plan_screen = await wait_for(pilot, PlanScreen)
+        assert plan_screen.plan.steps[0].args == ["switch", "--create", "login-stuff"]
+
+
+async def test_ai_branch_name_never_suggests_existing(repo, monkeypatch):
+    from gitly import ai
+    sh(repo, "branch", "login-page")
+    monkeypatch.setattr(ai, "available", lambda: True)
+    monkeypatch.setattr(ai, "suggest_branch_name",
+                        lambda *a: (ai.BranchName(name="login-page", reason="more specific"), {}))
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _new_branch_via_menu(pilot)
+        await pilot.press(*"login", "enter")
+        plan_screen = await wait_for(pilot, PlanScreen)
+        assert plan_screen.plan.steps[0].args == ["switch", "--create", "login"]  # kept the user's
