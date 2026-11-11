@@ -9,12 +9,17 @@
 
 These three read the unsaved diff (see git.working_diff). Set
 GITLY_AI_SEND_CODE=0 to send only file names, never file contents.
+
+The API key comes from ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN if set,
+otherwise from the key the user pasted into gitly, saved (mode 600) at
+~/.config/gitly/api_key.
 """
 
 from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
 from pydantic import BaseModel, Field
 
@@ -132,8 +137,39 @@ class AIUnavailable(Exception):
     pass
 
 
-def available() -> bool:
+class AIKeyRejected(AIUnavailable):
+    """The API key was refused; the user can paste a new one."""
+
+
+def key_file() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return Path(base) / "gitly" / "api_key"
+
+
+def key_from_env() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+
+
+def saved_key() -> str | None:
+    try:
+        return key_file().read_text().strip() or None
+    except OSError:
+        return None
+
+
+def save_key(key: str) -> Path:
+    """Store the key where only this user can read it. Returns the file path."""
+    path = key_file()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(key.strip() + "\n")
+    os.chmod(path, 0o600)  # in case the file already existed with looser permissions
+    return path
+
+
+def available() -> bool:
+    return key_from_env() or saved_key() is not None
 
 
 def shares_code() -> bool:
@@ -165,7 +201,9 @@ def _call(system: str, content: str, output_format: type[BaseModel], max_tokens:
     except ImportError as e:  # pragma: no cover
         raise AIUnavailable("The anthropic package isn't installed.") from e
 
-    client = anthropic.Anthropic(max_retries=1, timeout=60)
+    # An environment variable wins; otherwise use the key saved from inside gitly.
+    key = None if key_from_env() else saved_key()
+    client = anthropic.Anthropic(max_retries=1, timeout=60, **({"api_key": key} if key else {}))
     start = time.monotonic()
     try:
         resp = client.messages.parse(
@@ -177,6 +215,8 @@ def _call(system: str, content: str, output_format: type[BaseModel], max_tokens:
             output_format=output_format,
         )
     except anthropic.AuthenticationError as e:
+        if key:
+            raise AIKeyRejected("Your Anthropic API key was rejected.") from e
         raise AIUnavailable("Your Anthropic API key was rejected. Check ANTHROPIC_API_KEY.") from e
     except anthropic.RateLimitError as e:
         raise AIUnavailable("Too many AI requests right now. Wait a minute and try again.") from e

@@ -612,3 +612,27 @@ async def test_ai_branch_name_never_suggests_existing(repo, monkeypatch):
         await pilot.press(*"login", "enter")
         plan_screen = await wait_for(pilot, PlanScreen)
         assert plan_screen.plan.steps[0].args == ["switch", "--create", "login"]  # kept the user's
+
+
+async def test_ask_without_key_offers_to_save_one(repo, tmp_path, monkeypatch):
+    from gitly import ai
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("question_mark")
+        for _ in range(50):
+            await pilot.pause(0.05)
+            if isinstance(app.screen, AskTextScreen):
+                break
+        assert app.screen.title_text == "Turn on AI"
+        assert app.screen.query_one("Input").password
+        await pilot.press(*"sk-ant-abc", "enter")
+        for _ in range(50):
+            await pilot.pause(0.05)
+            if isinstance(app.screen, AskTextScreen) and app.screen.title_text == "Ask in plain English":
+                break
+        assert app.screen.title_text == "Ask in plain English"  # goes straight on to the question
+        await pilot.press("escape")
+        await app.workers.wait_for_complete()
+    assert ai.saved_key() == "sk-ant-abc"

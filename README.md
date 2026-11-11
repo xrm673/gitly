@@ -39,7 +39,13 @@ uv venv && uv pip install -e '.[dev]'
 .venv/bin/gitly ~/my-app   # or point it at a project
 ```
 
-To turn on **Ask in plain English**, set an Anthropic API key:
+The AI features need an Anthropic API key (get one at platform.claude.com →
+API Keys). The first time you use one, for example **Ask in plain English**
+(`?`), gitly asks you to paste the key and saves it to
+`~/.config/gitly/api_key`, readable only by you. If the key is ever rejected,
+gitly asks for a new one.
+
+You can use an environment variable instead; it takes priority over the saved key:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...

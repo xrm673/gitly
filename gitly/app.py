@@ -59,16 +59,18 @@ class AskTextScreen(ModalScreen):
 
     BINDINGS = [Binding("escape", "dismiss(None)", "Cancel")]
 
-    def __init__(self, title: str, placeholder: str = "", hint: str = "", value: str = ""):
+    def __init__(self, title: str, placeholder: str = "", hint: str = "", value: str = "",
+                 password: bool = False):
         super().__init__()
         self.title_text, self.placeholder, self.hint, self.value = title, placeholder, hint, value
+        self.password = password
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
             yield Static(f"[b]{escape(self.title_text)}[/]", classes="dialog-title")
             if self.hint:
                 yield Static(self.hint, classes="muted")
-            yield Input(value=self.value, placeholder=self.placeholder)
+            yield Input(value=self.value, placeholder=self.placeholder, password=self.password)
             yield Static("[dim]Enter to continue · Esc to cancel[/]")
 
     @on(Input.Submitted)
@@ -998,11 +1000,34 @@ class Gitly(App):
             return None
         return name
 
-    async def ai_setup_help(self) -> None:
-        await self.push_screen_wait(TextScreen("AI isn't set up", (
-            "To use the AI features, set an Anthropic API key:\n\n"
-            "  [b]export ANTHROPIC_API_KEY=sk-ant-...[/]\n\n"
-            "then restart gitly. Everything else works without it.")))
+    async def ai_setup(self, rejected: bool = False) -> bool:
+        """Ask for an Anthropic API key and save it. Returns True if one was saved."""
+        if ai.key_from_env():
+            await self.push_screen_wait(TextScreen("AI key rejected", (
+                "Your ANTHROPIC_API_KEY environment variable was rejected. Fix or remove it "
+                "(e.g. in ~/.zshrc), then restart gitly.")))
+            return False
+        lead = ("That key was rejected. Paste a new one." if rejected
+                else "The AI features need an Anthropic API key. Everything else works without it.")
+        key = await self.push_screen_wait(AskTextScreen(
+            "Turn on AI", placeholder="sk-ant-...", password=True,
+            hint=(f"{lead}\nGet one at [b]platform.claude.com[/] → API Keys, then paste it here. "
+                  f"It's saved on this computer only ({escape(str(ai.key_file()).replace(str(Path.home()), '~'))}).")))
+        if not key:
+            return False
+        key = "".join(key.split())  # pasted keys sometimes pick up spaces or line breaks
+        if not key.startswith("sk-ant-"):
+            self.notify("That doesn't look like an Anthropic API key (they start with sk-ant-).",
+                        severity="warning", timeout=8)
+            return False
+        try:
+            ai.save_key(key)
+        except OSError as e:
+            self.notify(f"Couldn't save the key: {e}", severity="error", timeout=8)
+            return False
+        self.log_.event("ai_key_saved", replaced=rejected)
+        self.notify("Key saved. AI features are on.")
+        return True
 
     async def with_ai(self, fn, *args, doing: str, event: str):
         """Run one AI call behind a "Thinking…" dialog. Returns its result, or None on failure."""
@@ -1010,17 +1035,24 @@ class Gitly(App):
         try:
             result, tel = await asyncio.to_thread(fn, *args)
         except ai.AIUnavailable as e:
-            self.log_.event("ai_error", feature=event, message=str(e))
-            self.notify(str(e), severity="error", timeout=8)
-            return None
+            failed = e
+        else:
+            failed = None
         finally:
             self.pop_screen()
+        if failed is not None:
+            self.log_.event("ai_error", feature=event, message=str(failed))
+            if isinstance(failed, ai.AIKeyRejected):
+                if await self.ai_setup(rejected=True):  # the saved key was refused: offer a new one, retry once
+                    return await self.with_ai(fn, *args, doing=doing, event=event)
+            else:
+                self.notify(str(failed), severity="error", timeout=8)
+            return None
         self.log_.event(event, **tel)
         return result
 
     async def explain_flow(self, s: git.RepoState) -> None:
-        if not ai.available():
-            await self.ai_setup_help()
+        if not ai.available() and not await self.ai_setup():
             return
         summary = await self.with_ai(ai.summarize_changes, s, doing="reading your changes",
                                      event="ai_summary")
@@ -1034,8 +1066,7 @@ class Gitly(App):
         await self.push_screen_wait(TextScreen("What did I change?", body))
 
     async def ask_flow(self, preset: str = "", error: str | None = None) -> None:
-        if not ai.available():
-            await self.ai_setup_help()
+        if not ai.available() and not await self.ai_setup():
             return
         if self.repo is None:
             self.notify("Start tracking this folder first.", severity="warning")

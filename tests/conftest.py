@@ -1,5 +1,6 @@
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,8 @@ os.environ.update({
 # Never reach the real AI from tests, even if the developer has a key set.
 for _k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "GITLY_AI_SEND_CODE"):
     os.environ.pop(_k, None)
+# ...and never read the key the developer saved from inside gitly (~/.config/gitly/api_key).
+os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="gitly-test-config-")
 
 
 def sh(cwd, *args):
