@@ -928,3 +928,82 @@ async def test_background_fetch_failure_is_quiet(repo, monkeypatch):
         await pilot.pause()
         assert "couldn't reach GitHub just now" in str(app.query_one("#summary").render())
         assert app.screen is app.screen_stack[0]  # no error dialog
+
+
+def _push_new_branch(repo, other, name="login"):
+    sh(other, "switch", "-qc", name)
+    (other / "l.txt").write_text("l\n"); sh(other, "add", "."); sh(other, "commit", "-qm", "login form")
+    sh(other, "push", "-qu", "origin", name)
+    sh(repo, "fetch", "-q")
+
+
+async def test_switch_list_offers_github_only_branch(remote_pair):
+    repo, other = remote_pair
+    _push_new_branch(repo, other)
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await choose(pilot, "branches")
+        ol = app.screen.query_one("OptionList")
+        ol.highlighted = ol.get_option_index("switch")
+        await pilot.press("enter")
+        await pilot.pause()
+        ol = app.screen.query_one("OptionList")
+        assert "only on GitHub" in str(ol.get_option("github:login").prompt)
+        ol.highlighted = ol.get_option_index("github:login")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, PlanScreen)
+        assert app.screen.plan.steps[0].args == ["switch", "--track", "origin/login"]
+        await _run_plan_and_return(pilot)
+    assert sh(repo, "branch", "--show-current").strip() == "login"
+    assert sh(repo, "rev-parse", "--abbrev-ref", "login@{upstream}").strip() == "origin/login"
+
+
+async def test_map_enter_gets_github_only_branch(remote_pair):
+    repo, other = remote_pair
+    _push_new_branch(repo, other)
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        bm = await _open_map(pilot)
+        row = next(r for r, l in enumerate(bm.g.lanes) if l.kind == "github")
+        bm.sel = (row, 0)
+        await pilot.press("space")  # can't carry it: it isn't here yet
+        await pilot.pause()
+        assert bm.held is None
+        await pilot.press("enter")
+        await wait_for(pilot, PlanScreen)
+        assert app.screen.plan.steps[-1].args == ["switch", "--track", "origin/login"]
+        await _run_plan_and_return(pilot)
+    assert sh(repo, "branch", "--show-current").strip() == "login"
+
+
+async def test_map_up_down_lands_on_latest_save(repo):
+    sh(repo, "switch", "-qc", "login")
+    for n in ("one", "two", "three"):
+        (repo / f"{n}.txt").write_text(n); sh(repo, "add", "."); sh(repo, "commit", "-qm", n)
+    sh(repo, "switch", "-q", "main")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        bm = await _open_map(pilot)
+        await pilot.press("down")
+        lane, sha = bm.selected()
+        assert lane.name == "login" and sha == lane.tip
+        await pilot.press("left", "up", "down")
+        assert bm.selected()[1] == lane.tip
+
+
+async def test_map_cursor_follows_a_new_save(repo):
+    (repo / "b.txt").write_text("b"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "second")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        bm = await _open_map(pilot)
+        assert bm.selected()[1] == bm.selected()[0].tip  # on main's latest save
+        (repo / "c.txt").write_text("c"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "third")
+        app.refresh_state(keep_highlight=True)
+        lane, sha = bm.selected()
+        assert lane.name == "main" and sha == sh(repo, "rev-parse", "HEAD").strip()
+        await pilot.press("left")  # an older save, picked on purpose, stays picked
+        picked = bm.selected()[1]
+        (repo / "d.txt").write_text("d"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "fourth")
+        app.refresh_state(keep_highlight=True)
+        assert bm.selected()[1] == picked

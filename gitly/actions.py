@@ -95,6 +95,19 @@ def switch_steps(name: str, carrying: int) -> list[Step]:
     return [Step(["switch", name], why)]
 
 
+def switch_github_steps(name: str, ref: str, carrying: int) -> list[Step]:
+    """Get a branch that's only on GitHub (`ref`, e.g. origin/login) and move onto it."""
+    why = f"Make a copy of GitHub's '{name}' on this computer and move to it."
+    if carrying:
+        why += (f" Your {carrying} unsaved file{'s come' if carrying != 1 else ' comes'} with you: "
+                f"'{name}' doesn't change {'them' if carrying != 1 else 'it'}.")
+    return [Step(["switch", "--track", ref], why)]
+
+
+def switch_github(name: str, ref: str) -> Plan:
+    return Plan("Switch branch", switch_github_steps(name, ref, 0))
+
+
 def branch_steps(name: str, at: str | None, label: str, carrying: int) -> list[Step]:
     """Create `name` at commit `at` (None = where you are) and move onto it."""
     args = ["switch", "--create", name] + ([at] if at else [])

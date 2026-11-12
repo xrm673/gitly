@@ -269,3 +269,85 @@ def test_two_previewed_saves_are_distinct(repo):
     twice = graph.after_save(graph.after_save(graph.build(s), "one"), "two")
     assert [c.subject for c in lane(twice, "main").commits] == ["first", "one", "two"]
     assert len(graph.columns(twice)) == 3
+
+
+def _github_only(repo, other, name, merged=False):
+    """`other` pushes a new branch `name`; repo fetches it. merged: it's combined into main too."""
+    sh(other, "switch", "-qc", name)
+    commit(other, name)
+    sh(other, "push", "-qu", "origin", name)
+    if merged:
+        sh(other, "switch", "-q", "main")
+        sh(other, "merge", "-q", "--no-ff", "--no-edit", name)
+        sh(other, "push", "-q", "origin", "main")
+    sh(repo, "fetch", "-q")
+
+
+def test_github_only_branch_gets_a_row(remote_pair):
+    repo, other = remote_pair
+    _github_only(repo, other, "login")
+    assert git.github_branches(repo) == [("login", "origin/login")]
+    g, lines = picture(repo)
+    row = lane(g, "login")
+    assert row.kind == "github" and row.upstream == "origin/login"
+    assert [c.subject for c in row.commits] == ["login"] and row.commits[0].remote_only
+    line = next(l for l in lines if "login" in l and "⇣" in l)
+    assert line.startswith("⇣ login") and "○" in line and "only on GitHub" in line
+    # Not dim: the dot keeps the lane's color.
+    markup = graph.render(g, git.state(repo))
+    assert f"[{graph.lane_color_for(row)}]○[/]" in markup
+
+
+def test_github_only_branch_already_combined_is_left_out(remote_pair):
+    repo, other = remote_pair
+    _github_only(repo, other, "done", merged=True)
+    s = git.state(repo)
+    assert s.behind == 2  # main on GitHub has the branch's save and the merge
+    g = graph.build(s)
+    assert all(l.name != "done" for l in g.lanes)
+
+
+def test_local_branches_are_not_listed_as_github_only(remote_pair):
+    repo, other = remote_pair
+    _github_only(repo, other, "login")
+    sh(repo, "switch", "-q", "--track", "origin/login")
+    assert git.github_branches(repo) == []
+    assert lane(graph.build(git.state(repo)), "login").kind == "branch"
+
+
+def test_after_switch_to_github_branch(remote_pair):
+    repo, other = remote_pair
+    _github_only(repo, other, "login")
+    g = graph.build(git.state(repo))
+    after = graph.after_switch(g, "login")
+    row = lane(after, "login")
+    assert row.kind == "branch" and row.current and not row.commits[0].remote_only
+    assert after.head == row.tip
+
+
+def test_selected_row_label_is_highlighted(repo):
+    sh(repo, "switch", "-qc", "login")
+    commit(repo, "form")
+    s = git.state(repo)
+    g = graph.build(s)
+    row = next(r for r, l in enumerate(g.lanes) if l.name == "main")
+    x = graph.columns(g)[g.lanes[row].commits[-1].sha]
+    first = graph.render(g, s, selected=(row, x)).splitlines()[row]
+    assert first.startswith(f"[b #0b0e14 on {graph.lane_color_for(g.lanes[row])}]")
+    plain = Text.from_markup(graph.render(g, s, selected=(row, x))).plain.splitlines()
+    assert plain == Text.from_markup(graph.render(g, s)).plain.splitlines()  # same layout, only colors
+
+
+def test_combining_save_is_joined_to_the_branch_it_brings_in(repo):
+    commit(repo, "second")
+    sh(repo, "switch", "-qc", "login")
+    commit(repo, "login form")
+    sh(repo, "switch", "-q", "main")
+    s = git.state(repo)
+    g = graph.build(s)
+    before = Text.from_markup(graph.render(g, s, compact=True)).plain.splitlines()
+    assert "╯" not in before[1]
+    after = Text.from_markup(graph.render(graph.after_merge(g, "login", "main"), s, compact=True)).plain
+    main_row, login_row = after.splitlines()[:2]
+    assert "●──╯" in login_row  # login's line turns up into main's new save
+    assert main_row.index("◉") == login_row.index("╯")
