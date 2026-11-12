@@ -323,3 +323,16 @@ def test_after_switch_to_github_branch(remote_pair):
     row = lane(after, "login")
     assert row.kind == "branch" and row.current and not row.commits[0].remote_only
     assert after.head == row.tip
+
+
+def test_selected_row_label_is_highlighted(repo):
+    sh(repo, "switch", "-qc", "login")
+    commit(repo, "form")
+    s = git.state(repo)
+    g = graph.build(s)
+    row = next(r for r, l in enumerate(g.lanes) if l.name == "main")
+    x = graph.columns(g)[g.lanes[row].commits[-1].sha]
+    first = graph.render(g, s, selected=(row, x)).splitlines()[row]
+    assert first.startswith(f"[b #0b0e14 on {graph.lane_color_for(g.lanes[row])}]")
+    plain = Text.from_markup(graph.render(g, s, selected=(row, x))).plain.splitlines()
+    assert plain == Text.from_markup(graph.render(g, s)).plain.splitlines()  # same layout, only colors

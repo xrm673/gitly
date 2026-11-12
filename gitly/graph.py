@@ -583,6 +583,10 @@ def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
         bold = lane.current or (selected is not None and selected[0] == r)
         if held is not None and lane.is_branch and lane.name == held:
             label = f"[{SELECTED}]{escape(label):<{width}}[/]"
+        elif selected is not None and selected[0] == r:
+            # The row under the cursor: a block in the lane's own color, so moving
+            # up and down is easy to follow (bold alone looks like "you are here").
+            label = f"[b #0b0e14 on {lane_color_for(lane)}]{escape(label):<{width - 1}}[/] "
         else:
             label = f"[b]{escape(label):<{width}}[/]" if bold else f"{escape(label):<{width}}"
         cells = []
