@@ -349,6 +349,8 @@ class BranchMap(Vertical, can_focus=True):
         self.cells: list[list[tuple[int, str]]] = []
         self.sel: tuple[int, int] | None = None  # (lane index, index into its cells)
         self.held: str | None = None  # branch picked up with Space, to combine into another
+        # On the faint "new branch" row under where you are (self.sel keeps the row above it).
+        self.on_new = False
         self.ghost: graph.Ghost | None = None  # the suggested next step, drawn faintly
 
     def compose(self) -> ComposeResult:
@@ -434,19 +436,49 @@ class BranchMap(Vertical, can_focus=True):
         r, i = self.sel
         return self.g.lanes[r], self.cells[r][i][1]
 
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        # On the new-branch row there's no save to combine or undo: dim those keys.
+        if self.on_new and action in ("pick_up", "undo"):
+            return None
+        return True
+
+    def _plain_trunk(self) -> bool:
+        """On the main branch, with nothing half-done: show the "+ new branch" row."""
+        s, g = self.s, self.g
+        return bool(s and g and s.branch and s.branch == g.trunk and not s.detached
+                    and not (s.conflicts or s.merging or s.rebasing or s.reverting))
+
+    def _new_anchor(self) -> int | None:
+        """The row the new-branch row hangs under (where you are), if there is one."""
+        if self.g is None or not ((self.ghost and self.ghost.branch) or self._plain_trunk()):
+            return None
+        r = next((r for r, lane in enumerate(self.g.lanes) if graph._here(lane, self.g)), None)
+        return r if r is not None and self.cells[r] else None
+
     def _draw(self, focused: bool | None = None) -> None:
         if self.g is None or self.s is None:
             return
         focused = self.has_focus if focused is None else focused
-        cell = (self.sel[0], self.cells[self.sel[0]][self.sel[1]][0]) if self.sel and focused else None
+        if self._new_anchor() is None:
+            self.on_new = False
+        on_new = self.on_new and focused
+        cell = (self.sel[0], self.cells[self.sel[0]][self.sel[1]][0]) if self.sel and focused and not on_new else None
         self.query_one("#map", Static).update(graph.render(
             self.g, self.s, selected=cell, held=self.held, ghost=self.ghost,
-            max_width=self.query_one("#map-wrap").size.width or None))
+            max_width=self.query_one("#map-wrap").size.width or None,
+            new_row=self._plain_trunk(), new_selected=on_new))
+        self.refresh_bindings()  # the footer dims Combine / Undo on the new-branch row
         self.query_one("#map-detail", Static).update(
             self._detail() if focused else
             "[b]←[/] [dim]pick a save, then branch from it, switch, combine or undo[/]")
 
     def _detail(self) -> str:
+        if self.on_new:
+            if self.ghost and self.ghost.branch:
+                return (f"[b]{escape(self.ghost.branch)}[/] [dim]· a new branch, suggested · "
+                        "Enter starts it[/]")
+            return (f"[b]New branch[/] [dim]· Enter starts one from your latest save on "
+                    f"{escape(self.s.branch or '')}[/]")
         sel = self.selected()
         if sel is None:
             return "[dim]Nothing to select yet.[/]"
@@ -469,24 +501,44 @@ class BranchMap(Vertical, can_focus=True):
     def action_move(self, dr: int, dc: int) -> None:
         # → past a branch's latest save goes on to the menu on the right (not while carrying
         # a branch: leaving the map puts it down).
-        at_right_edge = self.sel is None or self.sel[1] == len(self.cells[self.sel[0]]) - 1
+        at_right_edge = (self.on_new or self.sel is None
+                         or self.sel[1] == len(self.cells[self.sel[0]]) - 1)
         if dc > 0 and at_right_edge and not self.held:
             self.screen.query_one("#menu").focus()
             return
         if self.sel is None:
             return
+        # The "new branch" row sits right under `anchor`; carrying a branch skips it.
+        anchor = None if self.held else self._new_anchor()
         r, i = self.sel
+        if self.on_new:
+            if dc:
+                return
+            if dr < 0:  # back up to the row it hangs under
+                self.on_new = False
+                r, i = anchor, len(self.cells[anchor]) - 1
+                self.sel = (r, i)
+                self._draw()
+                return
+            r = anchor  # going down: carry on from below it
         if dc:
             i = max(0, min(len(self.cells[r]) - 1, i + dc))
         else:
             rr = r + dr
             while 0 <= rr < len(self.cells) and not self.cells[rr]:
                 rr += dr
+            if anchor is not None and not self.on_new and (
+                    (dr > 0 and r == anchor) or (dr < 0 and rr == anchor)):
+                self.on_new = True
+                self.sel = (anchor, len(self.cells[anchor]) - 1)
+                self._draw()
+                return
             if not 0 <= rr < len(self.cells):
                 return
             # Up/down picks a branch, so land on its latest save (what Enter switches to);
             # left/right then walks back through older ones.
             r, i = rr, len(self.cells[rr]) - 1
+            self.on_new = False
         self.sel = (r, i)
         self._draw()
         # Keep the selected cell visible: rows start with a label, then 3 characters per column.
@@ -535,6 +587,9 @@ class BranchMap(Vertical, can_focus=True):
 
     @work(exclusive=True, group="map")
     async def action_new_branch(self) -> None:
+        if self.on_new:
+            await self._start_new()
+            return
         if reason := self._busy_reason():
             self.notify(reason, severity="warning")
             return
@@ -573,12 +628,33 @@ class BranchMap(Vertical, can_focus=True):
             self.screen.query_one("#menu").focus()
 
     def action_enter(self) -> None:
-        if self.held:
+        if self.on_new:
+            self.start_new_row()
+        elif self.held:
             self.combine()
         else:
             self.switch()
 
+    @work(exclusive=True, group="map")
+    async def start_new_row(self) -> None:
+        await self._start_new()
+
+    async def _start_new(self) -> None:
+        """Enter on the "new branch" row: take the suggested branch, or start one where you are."""
+        if self.ghost and self.ghost.branch:
+            self.app.log_.event("map_action", action="new_row", suggested=True)
+            self.app.handle("next")
+            return
+        if reason := self._busy_reason():
+            self.notify(reason, severity="warning")
+            return
+        self.app.log_.event("map_action", action="new_row", suggested=False)
+        await self.new_branch(self.s.head_sha)
+
     def action_pick_up(self) -> None:
+        if self.on_new:
+            self.notify("This branch doesn't exist yet. Press Enter to start it.")
+            return
         if reason := self._busy_reason():
             self.notify(reason, severity="warning")
             return
@@ -658,6 +734,9 @@ class BranchMap(Vertical, can_focus=True):
 
     @work(exclusive=True, group="map")
     async def action_undo(self) -> None:
+        if self.on_new:
+            self.notify("Nothing to undo here: this branch doesn't exist yet.")
+            return
         if reason := self._busy_reason():
             self.notify(reason, severity="warning")
             return
@@ -776,6 +855,10 @@ class Gitly(App):
             border-title-color: $primary; border-title-style: bold; }
     #next.quiet { border: round $panel-lighten-2; background: transparent; border-title-color: $text-muted; }
     #next Static { height: auto; }
+    #next-head { height: auto; }
+    #next-title { width: 1fr; }
+    #next-key { width: auto; margin-right: 1; }
+    #next.keyed #next-reason { padding-left: 8; }  /* under the title, past the key cap */
     #next-reason { padding-left: 2; color: $text-muted; }
     OptionList > .option-list--option-highlighted { background: $primary 14%; color: $text; text-style: none; }
     OptionList:focus > .option-list--option-highlighted { background: $primary 30%; color: $text;
@@ -806,8 +889,8 @@ class Gitly(App):
     """
     BINDINGS = [
         # Like accepting autocomplete: Tab takes the suggested next step from anywhere on the
-        # home screen. In dialogs it still moves between fields.
-        Binding("tab", "take_next", "Do next step", show=False, priority=True),
+        # home screen. In dialogs it still moves between fields (see check_action).
+        Binding("tab", "take_next", "Do next step", priority=True),
         Binding("question_mark", "ask", "Ask in plain English"),
         Binding("x", "not_now", "Skip suggestion"),
         Binding("r", "refresh", "Refresh"),
@@ -849,7 +932,9 @@ class Gitly(App):
         with Horizontal(id="body"):
             with Vertical(id="left"):
                 with Vertical(id="next"):
-                    yield Static(id="next-title")
+                    with Horizontal(id="next-head"):
+                        yield Static(id="next-key")  # a key cap: Tab takes the step
+                        yield Static(id="next-title")
                     yield Static(id="next-reason")
                 yield VerticalScroll(Static(id="filelist"), id="files")
                 yield BranchMap(id="branchmap")
@@ -1016,6 +1101,11 @@ class Gitly(App):
         panel = self.home.query_one("#next")
         panel.query_one("#next-title", Static).update(f"{mark} [b]{escape(sg.title)}[/]")
         panel.query_one("#next-reason", Static).update(escape(sg.reason))
+        key = panel.query_one("#next-key", Static)
+        key.display = sg.acceptable
+        key.update("[b #0b0e14 on $primary] Tab [/]")
+        panel.set_class(sg.acceptable, "keyed")
+        self.refresh_bindings()  # the footer's "tab Do next step" follows the suggestion
         panel.set_class(not sg.acceptable, "quiet")
         panel.border_title = "Next step"
         if self._ai_running:
@@ -1024,7 +1114,7 @@ class Gitly(App):
             panel.border_subtitle = f"[{AI_COLOR}]✦[/] from the AI" if ai_made else ""
         else:
             panel.border_subtitle = ((f"[{AI_COLOR}]✦[/] suggested by AI · " if ai_made else "")
-                                     + "Tab: do it · x: not now")
+                                     + "x: not now")
         self.home.query_one("#aistatus", Static).update(
             f"[{AI_COLOR}]✦[/] [dim]AI suggestions on[/]" if suggest.ambient() and self._ai_failures < 3
             else "[dim]✦ AI on request[/]" if ai.available()
@@ -1033,7 +1123,7 @@ class Gitly(App):
         first = next((i[0] for i in menu if i), None)
         if sg.acceptable and sg.menu != first:  # when it's already the top item, don't say it twice
             title = sg.title if len(sg.title) <= 38 else sg.title[:37].rstrip() + "…"
-            menu = [("next", f"{mark} [b]{escape(title)}[/]\n  [dim]suggested next step[/]"), None] + menu
+            menu = [("next", f"{mark} [b]{escape(title)}[/]\n  [dim]suggested next step ·[/] Tab"), None] + menu
         return menu
 
     def _suggest(self, s: git.RepoState | None, settle: bool) -> suggest.Suggestion:
@@ -1081,14 +1171,17 @@ class Gitly(App):
         if not self.busy and self.screen is self.screen_stack[0]:
             self.refresh_state(keep_highlight=True)
 
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        # "tab Do next step" is in the footer only while there is a step to take.
+        if action == "take_next":
+            sg = self.suggestion
+            return (self.screen is self.screen_stack[0] and sg is not None and sg.acceptable
+                    and not self.busy) or None
+        return True
+
     def action_take_next(self) -> None:
-        if self.screen is not self.screen_stack[0]:
-            self.screen.focus_next()  # a dialog: Tab keeps its usual meaning
-            return
-        sg = self.suggestion
-        if sg is None or not sg.acceptable or self.busy:
-            self.bell()
-            return
+        # Only runs when check_action allows it; otherwise Tab falls through to its usual
+        # meaning (moving focus), which is what dialogs need.
         self.log_.event("menu", choice="next", via="tab")
         self.handle("next")
 
@@ -1347,12 +1440,27 @@ class Gitly(App):
             better = git.tidy_branch_name(suggestion.name) if suggestion else ""
             if (better and better != name and better not in existing
                     and git.valid_branch_name(s.root, better)):
-                final = await self.push_screen_wait(AskTextScreen(
-                    "New branch", value=better,
-                    hint=(f"You typed “{escape(typed)}”. The AI suggests this "
-                          f"({escape(suggestion.reason.rstrip('.'))}). Edit it, or press Enter to use it.")))
-                self.log_.event("ai_branch_name_choice", choice="cancelled" if not final
-                                else "kept" if final.strip() == better else "edited")
+                # The AI's name is only a suggestion: the user picks theirs, the AI's, or edits.
+                mine_ok = bool(name) and name not in existing and git.valid_branch_name(s.root, name)
+                options = [("ai", f"[{AI_COLOR}]✦[/] [b]{escape(better)}[/]  [dim]the AI's suggestion[/]")]
+                if mine_ok:
+                    options.append(("mine", f"  [b]{escape(name)}[/]  [dim]the name you typed[/]"))
+                options.append(("edit", "  Edit the name…"))
+                pick = await self.push_screen_wait(ChooseScreen(
+                    "New branch: which name?", options,
+                    hint=(f"You typed “{escape(typed)}”. The AI suggests "
+                          f"[b]{escape(better)}[/] ({escape(suggestion.reason.rstrip('.'))}).")))
+                final = None
+                if pick == "ai":
+                    final = better
+                elif pick == "mine":
+                    final = name
+                elif pick == "edit":
+                    final = await self.push_screen_wait(AskTextScreen(
+                        "New branch", value=better, hint="Edit the name, then press Enter."))
+                self.log_.event("ai_branch_name_choice", choice=(
+                    "cancelled" if not final else "kept" if pick == "ai" else "mine" if pick == "mine"
+                    else "kept" if final.strip() == better else "edited"))
                 if not final:
                     return None
                 name = git.tidy_branch_name(final)

@@ -301,7 +301,7 @@ async def test_tab_takes_next_step_from_anywhere(repo):
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
         await _open_map(pilot)
-        assert app.suggestion.kind == "save"
+        assert app.suggestion.kind == "save" and app.query_one("#next-key").display
         await pilot.press("tab")
         dialog = await wait_for(pilot, AskTextScreen)
         await pilot.press("tab")  # inside a dialog, Tab only moves focus
@@ -351,7 +351,7 @@ async def test_map_switch_carries_unsaved_changes(repo):
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await _open_map(pilot)
-        await pilot.press("down")
+        await pilot.press("down", "down")
         assert screen.selected()[0].name == "login"
         await pilot.press("enter")
         plan_screen = await wait_for(pilot, PlanScreen)
@@ -374,7 +374,7 @@ async def test_map_switch_saves_first_when_in_the_way(repo):
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
         await _open_map(pilot)
-        await pilot.press("down", "enter")
+        await pilot.press("down", "down", "enter")
         choose_screen = await wait_for(pilot, ChooseScreen)
         assert "a.txt" in str(choose_screen.query("Static")[1].render())
         await pilot.press("enter")  # save first
@@ -440,7 +440,7 @@ async def test_map_combine_branch(repo):
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await _open_map(pilot)
-        await pilot.press("down", "space")
+        await pilot.press("down", "down", "space")
         assert screen.held == "login"
         assert "Carrying login" in str(screen.query_one("#map-detail").render())
         await pilot.press("up", "enter")
@@ -474,7 +474,7 @@ async def test_map_combine_predicts_conflict(repo):
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
         await _open_map(pilot)
-        await pilot.press("down", "space", "up", "enter")
+        await pilot.press("down", "down", "space", "up", "enter")
         plan_screen = await wait_for(pilot, PlanScreen)
         assert "a.txt" in plan_screen.plan.note and "Both branches changed" in plan_screen.plan.note
         await pilot.press("escape")
@@ -487,7 +487,7 @@ async def test_map_esc_puts_branch_down(repo):
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await _open_map(pilot)
-        await pilot.press("down", "space", "escape")
+        await pilot.press("down", "down", "space", "escape")
         await pilot.pause()
         assert screen.held is None and app.focused is screen  # first Esc puts it down
         await pilot.press("escape")
@@ -550,7 +550,7 @@ async def test_map_undo_refuses_other_branch(repo):
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
         await _open_map(pilot)
-        await pilot.press("down", "u")
+        await pilot.press("down", "down", "u")
         await pilot.pause()
         await app.workers.wait_for_complete()
         assert not isinstance(app.screen, PlanScreen)
@@ -569,6 +569,7 @@ async def _new_branch_via_menu(pilot):
 
 async def test_ai_tidies_branch_name(repo, tmp_path, monkeypatch):
     from gitly import ai
+    from gitly.app import ChooseScreen
     monkeypatch.setenv("GITLY_LOG_DIR", str(tmp_path / "logs"))
     monkeypatch.setattr(ai, "available", lambda: True)
     seen = {}
@@ -582,13 +583,10 @@ async def test_ai_tidies_branch_name(repo, tmp_path, monkeypatch):
     async with app.run_test(size=(120, 40)) as pilot:
         await _new_branch_via_menu(pilot)
         await pilot.press(*"footer thing", "enter")
-        for _ in range(60):
-            await pilot.pause(0.05)
-            if isinstance(app.screen, AskTextScreen) and app.screen.query_one("Input").value:
-                break
-        assert app.screen.query_one("Input").value == "fix-mobile-footer"
-        assert "footer thing" in str(app.screen.query(".muted").first().render())
-        await pilot.press("enter")
+        pick = await wait_for(pilot, ChooseScreen)
+        assert [o[0] for o in pick.options] == ["ai", "mine", "edit"]
+        assert "footer thing" in str(pick.query(".muted").first().render())
+        await pilot.press("enter")  # the AI's name is first
         plan_screen = await wait_for(pilot, PlanScreen)
         assert plan_screen.plan.steps[0].args == ["switch", "--create", "fix-mobile-footer"]
         await pilot.press("enter")
@@ -597,6 +595,25 @@ async def test_ai_tidies_branch_name(repo, tmp_path, monkeypatch):
     assert sh(repo, "branch", "--show-current").strip() == "fix-mobile-footer"
     lines = [json.loads(l) for l in next((tmp_path / "logs").iterdir()).read_text().splitlines()]
     assert any(e["event"] == "ai_branch_name_choice" and e["choice"] == "kept" for e in lines)
+
+
+async def test_ai_branch_name_can_be_turned_down(repo, tmp_path, monkeypatch):
+    from gitly import ai
+    from gitly.app import ChooseScreen
+    monkeypatch.setenv("GITLY_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(ai, "available", lambda: True)
+    monkeypatch.setattr(ai, "suggest_branch_name",
+                        lambda *a: (ai.BranchName(name="fix-mobile-footer", reason="more specific"), {}))
+    app = Gitly(str(repo), participant="P04")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _new_branch_via_menu(pilot)
+        await pilot.press(*"Footer Thing", "enter")
+        await wait_for(pilot, ChooseScreen)
+        await pilot.press("down", "enter")  # "footer-thing, the name you typed"
+        plan_screen = await wait_for(pilot, PlanScreen)
+        assert plan_screen.plan.steps[0].args == ["switch", "--create", "footer-thing"]
+    lines = [json.loads(l) for l in next((tmp_path / "logs").iterdir()).read_text().splitlines()]
+    assert any(e["event"] == "ai_branch_name_choice" and e["choice"] == "mine" for e in lines)
 
 
 async def test_ai_branch_name_same_as_typed_skips_second_prompt(repo, monkeypatch):
@@ -708,6 +725,7 @@ async def test_nothing_to_save_is_greyed_out(remote_pair):
         await pilot.pause()
         menu = app.query_one("#menu")
         assert "all caught up" in text_of(app, "#next-title") and "next" not in menu_ids(app)
+        assert not app.query_one("#next-key").display  # no Tab key cap without a step to take
         assert menu.get_option("save").disabled and menu.get_option("upload").disabled
         assert "nothing to upload" in str(menu.get_option("upload").prompt)
         assert menu.highlighted_option.id == "pull"
@@ -1015,11 +1033,33 @@ async def test_map_up_down_lands_on_latest_save(repo):
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
         bm = await _open_map(pilot)
-        await pilot.press("down")
+        await pilot.press("down", "down")
         lane, sha = bm.selected()
         assert lane.name == "login" and sha == lane.tip
         await pilot.press("left", "up", "down")
         assert bm.selected()[1] == lane.tip
+
+
+async def test_map_new_branch_row_on_main(repo):
+    _login_branch(repo)
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        bm = await _open_map(pilot)
+        assert "+ new branch" in str(bm.query_one("#map").render())
+        await pilot.press("down")  # main → the new-branch row right under it
+        assert bm.on_new and "New branch" in str(bm.query_one("#map-detail").render())
+        await pilot.press("down")  # → login
+        assert not bm.on_new and bm.selected()[0].name == "login"
+        await pilot.press("up", "up")  # back over the new row to main
+        assert not bm.on_new and bm.selected()[0].name == "main"
+        await pilot.press("down", "enter")
+        await wait_for(pilot, AskTextScreen)
+        await pilot.press(*"idea", "enter")
+        plan_screen = await wait_for(pilot, PlanScreen)
+        assert ["switch", "--create", "idea"] in [st.args for st in plan_screen.plan.steps]
+        await _run_plan_and_return(pilot)
+        assert "+ new branch" not in str(bm.query_one("#map").render())  # only shown on main
+    assert sh(repo, "branch", "--show-current").strip() == "idea"
 
 
 async def test_map_cursor_follows_a_new_save(repo):
