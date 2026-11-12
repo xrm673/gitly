@@ -266,7 +266,7 @@ class Menu(OptionList):
 
 
 class BranchMap(Vertical, can_focus=True):
-    """The branch map panel on the home screen. Tab focuses it.
+    """The branch map panel on the home screen. ← from the menu focuses it.
 
     While focused, arrow keys pick a save. n: new branch here · Enter: switch ·
     Space then Enter: combine one branch into another · u: undo a save ·
@@ -396,7 +396,7 @@ class BranchMap(Vertical, can_focus=True):
             max_width=self.query_one("#map-wrap").size.width or None))
         self.query_one("#map-detail", Static).update(
             self._detail() if focused else
-            "[b]Tab[/] [dim]pick a save, then branch from it, switch, combine or undo[/]")
+            "[b]←[/] [dim]pick a save, then branch from it, switch, combine or undo[/]")
 
     def _detail(self) -> str:
         sel = self.selected()
@@ -757,6 +757,9 @@ class Gitly(App):
     LoadingIndicator { height: 3; }
     """
     BINDINGS = [
+        # Like accepting autocomplete: Tab takes the suggested next step from anywhere on the
+        # home screen. In dialogs it still moves between fields.
+        Binding("tab", "take_next", "Do next step", show=False, priority=True),
         Binding("question_mark", "ask", "Ask in plain English"),
         Binding("x", "not_now", "Skip suggestion"),
         Binding("r", "refresh", "Refresh"),
@@ -809,7 +812,7 @@ class Gitly(App):
         self.log_.event("start", cwd=self.cwd, ai_available=ai.available(), model=ai.MODEL)
         files = self.home.query_one("#files")
         files.border_title = "Changes"
-        files.can_focus = False  # Tab moves between the menu and the branch map
+        files.can_focus = False  # ← → move between the branch map and the menu
         self.home.query_one("#menu").border_title = "What do you want to do?"
         self.refresh_state()
         self.home.query_one("#menu").focus()
@@ -969,7 +972,7 @@ class Gitly(App):
             panel.border_subtitle = f"[{AI_COLOR}]✦[/] from the AI" if ai_made else ""
         else:
             panel.border_subtitle = ((f"[{AI_COLOR}]✦[/] suggested by AI · " if ai_made else "")
-                                     + "Enter: do it · x: not now")
+                                     + "Tab: do it · x: not now")
         self.home.query_one("#aistatus", Static).update(
             f"[{AI_COLOR}]✦[/] [dim]AI suggestions on[/]" if suggest.ambient() and self._ai_failures < 3
             else "[dim]✦ AI on request[/]" if ai.available()
@@ -1025,6 +1028,17 @@ class Gitly(App):
             self._ai_last = time.monotonic()
         if not self.busy and self.screen is self.screen_stack[0]:
             self.refresh_state(keep_highlight=True)
+
+    def action_take_next(self) -> None:
+        if self.screen is not self.screen_stack[0]:
+            self.screen.focus_next()  # a dialog: Tab keeps its usual meaning
+            return
+        sg = self.suggestion
+        if sg is None or not sg.acceptable or self.busy:
+            self.bell()
+            return
+        self.log_.event("menu", choice="next", via="tab")
+        self.handle("next")
 
     def action_not_now(self) -> None:
         sg = self.suggestion

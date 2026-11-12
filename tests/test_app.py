@@ -255,8 +255,8 @@ async def test_branch_map_on_home_screen(repo):
         bm = app.query_one(BranchMap)
         text = str(bm.query_one("#map").render())
         assert "login" in text and "you are here" in text  # visible without opening anything
-        assert app.focused.id == "menu" and "Tab" in str(bm.query_one("#map-detail").render())
-        await pilot.press("tab")
+        assert app.focused.id == "menu" and "←" in str(bm.query_one("#map-detail").render())
+        await pilot.press("left")
         assert app.focused is bm and "login form" in str(bm.query_one("#map-detail").render())
         await pilot.press("escape")
         assert app.focused.id == "menu"
@@ -294,6 +294,19 @@ async def test_arrows_move_between_map_and_menu(repo):
         assert app.focused is menu
         await pilot.press("left")
         assert app.focused is bm
+
+
+async def test_tab_takes_next_step_from_anywhere(repo):
+    (repo / "a.txt").write_text("edited\n")  # unsaved work: the next step is to save it
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _open_map(pilot)
+        assert app.suggestion.kind == "save"
+        await pilot.press("tab")
+        dialog = await wait_for(pilot, AskTextScreen)
+        await pilot.press("tab")  # inside a dialog, Tab only moves focus
+        await pilot.pause()
+        assert app.screen is dialog and len(app.screen_stack) == 2
 
 
 async def wait_for(pilot, cls, tries=60):
@@ -401,7 +414,7 @@ async def _open_map(pilot):
     """Focus the branch map panel on the home screen."""
     from gitly.app import BranchMap
     await pilot.pause()
-    await pilot.press("tab")
+    await pilot.press("left")
     bm = pilot.app.query_one(BranchMap)
     assert pilot.app.focused is bm
     return bm
