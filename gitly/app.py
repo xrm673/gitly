@@ -1426,12 +1426,27 @@ class Gitly(App):
             better = git.tidy_branch_name(suggestion.name) if suggestion else ""
             if (better and better != name and better not in existing
                     and git.valid_branch_name(s.root, better)):
-                final = await self.push_screen_wait(AskTextScreen(
-                    "New branch", value=better,
-                    hint=(f"You typed “{escape(typed)}”. The AI suggests this "
-                          f"({escape(suggestion.reason.rstrip('.'))}). Edit it, or press Enter to use it.")))
-                self.log_.event("ai_branch_name_choice", choice="cancelled" if not final
-                                else "kept" if final.strip() == better else "edited")
+                # The AI's name is only a suggestion: the user picks theirs, the AI's, or edits.
+                mine_ok = bool(name) and name not in existing and git.valid_branch_name(s.root, name)
+                options = [("ai", f"[{AI_COLOR}]✦[/] [b]{escape(better)}[/]  [dim]the AI's suggestion[/]")]
+                if mine_ok:
+                    options.append(("mine", f"  [b]{escape(name)}[/]  [dim]the name you typed[/]"))
+                options.append(("edit", "  Edit the name…"))
+                pick = await self.push_screen_wait(ChooseScreen(
+                    "New branch: which name?", options,
+                    hint=(f"You typed “{escape(typed)}”. The AI suggests "
+                          f"[b]{escape(better)}[/] ({escape(suggestion.reason.rstrip('.'))}).")))
+                final = None
+                if pick == "ai":
+                    final = better
+                elif pick == "mine":
+                    final = name
+                elif pick == "edit":
+                    final = await self.push_screen_wait(AskTextScreen(
+                        "New branch", value=better, hint="Edit the name, then press Enter."))
+                self.log_.event("ai_branch_name_choice", choice=(
+                    "cancelled" if not final else "kept" if pick == "ai" else "mine" if pick == "mine"
+                    else "kept" if final.strip() == better else "edited"))
                 if not final:
                     return None
                 name = git.tidy_branch_name(final)

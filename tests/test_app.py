@@ -569,6 +569,7 @@ async def _new_branch_via_menu(pilot):
 
 async def test_ai_tidies_branch_name(repo, tmp_path, monkeypatch):
     from gitly import ai
+    from gitly.app import ChooseScreen
     monkeypatch.setenv("GITLY_LOG_DIR", str(tmp_path / "logs"))
     monkeypatch.setattr(ai, "available", lambda: True)
     seen = {}
@@ -582,13 +583,10 @@ async def test_ai_tidies_branch_name(repo, tmp_path, monkeypatch):
     async with app.run_test(size=(120, 40)) as pilot:
         await _new_branch_via_menu(pilot)
         await pilot.press(*"footer thing", "enter")
-        for _ in range(60):
-            await pilot.pause(0.05)
-            if isinstance(app.screen, AskTextScreen) and app.screen.query_one("Input").value:
-                break
-        assert app.screen.query_one("Input").value == "fix-mobile-footer"
-        assert "footer thing" in str(app.screen.query(".muted").first().render())
-        await pilot.press("enter")
+        pick = await wait_for(pilot, ChooseScreen)
+        assert [o[0] for o in pick.options] == ["ai", "mine", "edit"]
+        assert "footer thing" in str(pick.query(".muted").first().render())
+        await pilot.press("enter")  # the AI's name is first
         plan_screen = await wait_for(pilot, PlanScreen)
         assert plan_screen.plan.steps[0].args == ["switch", "--create", "fix-mobile-footer"]
         await pilot.press("enter")
@@ -597,6 +595,25 @@ async def test_ai_tidies_branch_name(repo, tmp_path, monkeypatch):
     assert sh(repo, "branch", "--show-current").strip() == "fix-mobile-footer"
     lines = [json.loads(l) for l in next((tmp_path / "logs").iterdir()).read_text().splitlines()]
     assert any(e["event"] == "ai_branch_name_choice" and e["choice"] == "kept" for e in lines)
+
+
+async def test_ai_branch_name_can_be_turned_down(repo, tmp_path, monkeypatch):
+    from gitly import ai
+    from gitly.app import ChooseScreen
+    monkeypatch.setenv("GITLY_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(ai, "available", lambda: True)
+    monkeypatch.setattr(ai, "suggest_branch_name",
+                        lambda *a: (ai.BranchName(name="fix-mobile-footer", reason="more specific"), {}))
+    app = Gitly(str(repo), participant="P04")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _new_branch_via_menu(pilot)
+        await pilot.press(*"Footer Thing", "enter")
+        await wait_for(pilot, ChooseScreen)
+        await pilot.press("down", "enter")  # "footer-thing, the name you typed"
+        plan_screen = await wait_for(pilot, PlanScreen)
+        assert plan_screen.plan.steps[0].args == ["switch", "--create", "footer-thing"]
+    lines = [json.loads(l) for l in next((tmp_path / "logs").iterdir()).read_text().splitlines()]
+    assert any(e["event"] == "ai_branch_name_choice" and e["choice"] == "mine" for e in lines)
 
 
 async def test_ai_branch_name_same_as_typed_skips_second_prompt(repo, monkeypatch):

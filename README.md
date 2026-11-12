@@ -181,8 +181,8 @@ If the AI is unreachable, the box is simply empty and you type your own.
 or a few words, like "fix the footer on phones". The AI turns it into a proper
 branch name (`fix/footer-on-phones`): it keeps your words, follows the repo's
 prefix style if it has one, and uses your unsaved changes only when they're
-about the same thing. You see the suggestion next to what you typed and can
-edit it; if it's the same as yours, gitly doesn't ask twice. Without a key, or
+about the same thing. You then choose: the AI's name, the name you typed
+(tidied), or edit one; if they're the same, gitly doesn't ask twice. Without a key, or
 if the AI is down, gitly just tidies what you typed (`Login stuff!` →
 `login-stuff`). A suggestion that matches an existing branch is ignored.
 
