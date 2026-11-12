@@ -117,7 +117,8 @@ full commit graph: each branch shows its last few saves of its own. See
 `gitly/graph.py`.
 
 Press `←` to move from the menu to the map (`Esc`, or `→` past a branch's
-latest save, goes back). Arrow keys then pick a save; the line under the map says what it is, and the footer
+latest save, goes back). Arrow keys then pick a save (or click a row or a dot;
+clicking what's already selected acts like `Enter`); the line under the map says what it is, and the footer
 lists the keys.
 
 - `n` starts a new branch from the selected save. On main there's also a faint
