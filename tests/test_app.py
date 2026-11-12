@@ -301,7 +301,7 @@ async def test_tab_takes_next_step_from_anywhere(repo):
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
         await _open_map(pilot)
-        assert app.suggestion.kind == "save"
+        assert app.suggestion.kind == "save" and app.query_one("#next-key").display
         await pilot.press("tab")
         dialog = await wait_for(pilot, AskTextScreen)
         await pilot.press("tab")  # inside a dialog, Tab only moves focus
@@ -725,6 +725,7 @@ async def test_nothing_to_save_is_greyed_out(remote_pair):
         await pilot.pause()
         menu = app.query_one("#menu")
         assert "all caught up" in text_of(app, "#next-title") and "next" not in menu_ids(app)
+        assert not app.query_one("#next-key").display  # no Tab key cap without a step to take
         assert menu.get_option("save").disabled and menu.get_option("upload").disabled
         assert "nothing to upload" in str(menu.get_option("upload").prompt)
         assert menu.highlighted_option.id == "pull"

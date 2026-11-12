@@ -855,6 +855,9 @@ class Gitly(App):
             border-title-color: $primary; border-title-style: bold; }
     #next.quiet { border: round $panel-lighten-2; background: transparent; border-title-color: $text-muted; }
     #next Static { height: auto; }
+    #next-head { height: auto; }
+    #next-title { width: 1fr; }
+    #next-key { width: auto; margin-left: 2; }
     #next-reason { padding-left: 2; color: $text-muted; }
     OptionList > .option-list--option-highlighted { background: $primary 14%; color: $text; text-style: none; }
     OptionList:focus > .option-list--option-highlighted { background: $primary 30%; color: $text;
@@ -885,8 +888,8 @@ class Gitly(App):
     """
     BINDINGS = [
         # Like accepting autocomplete: Tab takes the suggested next step from anywhere on the
-        # home screen. In dialogs it still moves between fields.
-        Binding("tab", "take_next", "Do next step", show=False, priority=True),
+        # home screen. In dialogs it still moves between fields (see check_action).
+        Binding("tab", "take_next", "Do next step", priority=True),
         Binding("question_mark", "ask", "Ask in plain English"),
         Binding("x", "not_now", "Skip suggestion"),
         Binding("r", "refresh", "Refresh"),
@@ -928,7 +931,9 @@ class Gitly(App):
         with Horizontal(id="body"):
             with Vertical(id="left"):
                 with Vertical(id="next"):
-                    yield Static(id="next-title")
+                    with Horizontal(id="next-head"):
+                        yield Static(id="next-title")
+                        yield Static(id="next-key")  # a key cap: Tab takes the step
                     yield Static(id="next-reason")
                 yield VerticalScroll(Static(id="filelist"), id="files")
                 yield BranchMap(id="branchmap")
@@ -1095,6 +1100,10 @@ class Gitly(App):
         panel = self.home.query_one("#next")
         panel.query_one("#next-title", Static).update(f"{mark} [b]{escape(sg.title)}[/]")
         panel.query_one("#next-reason", Static).update(escape(sg.reason))
+        key = panel.query_one("#next-key", Static)
+        key.display = sg.acceptable
+        key.update("[b #0b0e14 on $primary] Tab [/] [b]do it[/]")
+        self.refresh_bindings()  # the footer's "tab Do next step" follows the suggestion
         panel.set_class(not sg.acceptable, "quiet")
         panel.border_title = "Next step"
         if self._ai_running:
@@ -1103,7 +1112,7 @@ class Gitly(App):
             panel.border_subtitle = f"[{AI_COLOR}]✦[/] from the AI" if ai_made else ""
         else:
             panel.border_subtitle = ((f"[{AI_COLOR}]✦[/] suggested by AI · " if ai_made else "")
-                                     + "Tab: do it · x: not now")
+                                     + "x: not now")
         self.home.query_one("#aistatus", Static).update(
             f"[{AI_COLOR}]✦[/] [dim]AI suggestions on[/]" if suggest.ambient() and self._ai_failures < 3
             else "[dim]✦ AI on request[/]" if ai.available()
@@ -1112,7 +1121,7 @@ class Gitly(App):
         first = next((i[0] for i in menu if i), None)
         if sg.acceptable and sg.menu != first:  # when it's already the top item, don't say it twice
             title = sg.title if len(sg.title) <= 38 else sg.title[:37].rstrip() + "…"
-            menu = [("next", f"{mark} [b]{escape(title)}[/]\n  [dim]suggested next step[/]"), None] + menu
+            menu = [("next", f"{mark} [b]{escape(title)}[/]\n  [dim]suggested next step ·[/] Tab"), None] + menu
         return menu
 
     def _suggest(self, s: git.RepoState | None, settle: bool) -> suggest.Suggestion:
@@ -1160,14 +1169,17 @@ class Gitly(App):
         if not self.busy and self.screen is self.screen_stack[0]:
             self.refresh_state(keep_highlight=True)
 
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        # "tab Do next step" is in the footer only while there is a step to take.
+        if action == "take_next":
+            sg = self.suggestion
+            return (self.screen is self.screen_stack[0] and sg is not None and sg.acceptable
+                    and not self.busy) or None
+        return True
+
     def action_take_next(self) -> None:
-        if self.screen is not self.screen_stack[0]:
-            self.screen.focus_next()  # a dialog: Tab keeps its usual meaning
-            return
-        sg = self.suggestion
-        if sg is None or not sg.acceptable or self.busy:
-            self.bell()
-            return
+        # Only runs when check_action allows it; otherwise Tab falls through to its usual
+        # meaning (moving focus), which is what dialogs need.
         self.log_.event("menu", choice="next", via="tab")
         self.handle("next")
 
