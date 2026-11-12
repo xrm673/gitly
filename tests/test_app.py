@@ -281,6 +281,21 @@ async def test_branch_map_keeps_selection_on_refresh(repo):
         assert bm.g is not built and bm.selected()[1] == picked
 
 
+async def test_arrows_move_between_map_and_menu(repo):
+    (repo / "b.txt").write_text("b"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "second")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        bm = await _open_map(pilot)
+        menu = app.query_one("#menu")
+        await pilot.press("left")  # an older save: → walks back to the newest, stays on the map
+        await pilot.press("right")
+        assert app.focused is bm
+        await pilot.press("right")  # past the newest save: over to the menu
+        assert app.focused is menu
+        await pilot.press("left")
+        assert app.focused is bm
+
+
 async def wait_for(pilot, cls, tries=60):
     for _ in range(tries):
         await pilot.pause(0.05)

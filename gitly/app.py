@@ -256,6 +256,15 @@ class ThinkingScreen(ModalScreen):
             yield LoadingIndicator()
 
 
+class Menu(OptionList):
+    """The home screen's action menu. ← goes over to the branch map on its left."""
+
+    BINDINGS = [Binding("left", "to_map", "Branch map", show=False)]
+
+    def action_to_map(self) -> None:
+        self.screen.query_one("#branchmap").focus()
+
+
 class BranchMap(Vertical, can_focus=True):
     """The branch map panel on the home screen. Tab focuses it.
 
@@ -410,6 +419,12 @@ class BranchMap(Vertical, can_focus=True):
         return head  # the keys are listed in the footer
 
     def action_move(self, dr: int, dc: int) -> None:
+        # → past a branch's latest save goes on to the menu on the right (not while carrying
+        # a branch: leaving the map puts it down).
+        at_right_edge = self.sel is None or self.sel[1] == len(self.cells[self.sel[0]]) - 1
+        if dc > 0 and at_right_edge and not self.held:
+            self.screen.query_one("#menu").focus()
+            return
         if self.sel is None:
             return
         r, i = self.sel
@@ -787,7 +802,7 @@ class Gitly(App):
                     yield Static(id="next-reason")
                 yield VerticalScroll(Static(id="filelist"), id="files")
                 yield BranchMap(id="branchmap")
-            yield OptionList(id="menu")
+            yield Menu(id="menu")
         yield Footer()
 
     def on_mount(self) -> None:
