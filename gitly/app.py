@@ -975,12 +975,16 @@ class Gitly(App):
                      ("back_to_branch", "Go back to my branch"), None]
         n = len(seen) + len(s.untracked)
         save_hint = f"  [dim]({n} file{'s' if n != 1 else ''})[/]" if n else "  [dim](nothing to save)[/]"
-        up_hint = f"  [dim]({s.ahead} new)[/]" if s.ahead else ""
+        # Nothing to upload: on GitHub already, with no saves of ours it lacks. (No GitHub yet,
+        # or a branch never uploaded, keeps it on: the plan explains or makes the first upload.)
+        up_to_date = bool(s.remotes and s.branch and s.upstream and not s.ahead)
+        up_hint = (f"  [dim]({s.ahead} new)[/]" if s.ahead
+                   else "  [dim](nothing to upload)[/]" if up_to_date else "")
         pull_hint = f"  [dim]({s.behind} waiting)[/]" if s.behind else ""
         menu += [
             ("save", "Save my work" + save_hint, not n),  # greyed out while there's nothing to save
             *([("explain", "What did I change?")] if s.dirty else []),
-            ("upload", "Upload to GitHub" + up_hint),
+            ("upload", "Upload to GitHub" + up_hint, up_to_date),
             ("pull", "Get latest" + pull_hint),
             None,
             ("branches", "Branches…"),

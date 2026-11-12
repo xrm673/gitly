@@ -708,7 +708,9 @@ async def test_nothing_to_save_is_greyed_out(remote_pair):
         await pilot.pause()
         menu = app.query_one("#menu")
         assert "all caught up" in text_of(app, "#next-title") and "next" not in menu_ids(app)
-        assert menu.get_option("save").disabled and menu.highlighted_option.id == "upload"
+        assert menu.get_option("save").disabled and menu.get_option("upload").disabled
+        assert "nothing to upload" in str(menu.get_option("upload").prompt)
+        assert menu.highlighted_option.id == "pull"
         (repo / "a.txt").write_text("edited\n")
         app.refresh_state(keep_highlight=True)
         assert not menu.get_option("save").disabled and menu_ids(app)[0] == "next"
