@@ -19,6 +19,8 @@ for _k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "GITLY_AI_SEND_CODE"):
 os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="gitly-test-config-")
 # The background "next step" AI call is off unless a test turns it on.
 os.environ["GITLY_AI_SUGGEST"] = "0"
+# ...and so is the background fetch, so tests see exactly the remote refs they set up.
+os.environ["GITLY_AUTO_FETCH"] = "0"
 
 
 def sh(cwd, *args):

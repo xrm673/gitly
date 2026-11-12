@@ -179,11 +179,17 @@ def init_repo() -> Plan:
 
 # --- conflict / detached-HEAD helpers (also used by rescue) -------------------
 
-def finish_merge() -> Plan:
-    return Plan("Finish combining", [
-        Step(["add", "--all"], "Mark the conflicts as resolved (you've edited the files)."),
-        Step(["commit", "--no-edit"], "Save the combined result."),
-    ], summary="Only do this after removing the <<<<<<< / >>>>>>> markers from each file.")
+def finish_merge(s: RepoState) -> Plan:
+    resolved = Step(["add", "--all"], "Mark the conflicts as resolved (you've edited the files).")
+    summary = "Only do this after removing the <<<<<<< / >>>>>>> markers from each file."
+    if s.rebasing:
+        # A plain commit would leave the rebase half done, with the rest of the saves never replayed.
+        return Plan("Finish rebase", [resolved, Step(
+            ["rebase", "--continue"],
+            "Save the fixed result and replay the rest of your saves. If a later one "
+            "overlaps too, git stops again and you fix that one the same way.")], summary=summary)
+    return Plan("Finish combining", [resolved, Step(["commit", "--no-edit"], "Save the combined result.")],
+                summary=summary)
 
 
 def abort_merge(s: RepoState) -> Plan:

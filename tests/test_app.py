@@ -841,3 +841,90 @@ async def test_ai_waits_for_files_to_settle(repo, monkeypatch):
         await app.workers.wait_for_complete()
         await pilot.pause()
         assert calls == ["save"] and "“x”" in text_of(app, "#next-title")
+
+
+def _conflicted_merge(repo):
+    _login_branch(repo, "a.txt", "login version\n")
+    (repo / "a.txt").write_text("main version\n"); sh(repo, "commit", "-qam", "main edit")
+    assert not git.run(["merge", "login"], repo).ok
+
+
+async def test_finish_merge_stops_on_leftover_markers(repo):
+    from gitly.app import ChooseScreen
+
+    _conflicted_merge(repo)
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await choose(pilot, "finish_merge")
+        warn = await wait_for(pilot, ChooseScreen)
+        assert "Conflict markers" in warn.title_text and "a.txt" in warn.hint
+        await pilot.press("enter")  # "Go back and fix them" is first
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app.screen is app.screen_stack[0]
+    assert git.state(repo).merging and "<<<<<<<" in (repo / "a.txt").read_text()
+
+
+async def test_finish_merge_after_fixing_markers(repo):
+    _conflicted_merge(repo)
+    (repo / "a.txt").write_text("both versions\n")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await choose(pilot, "finish_merge")
+        await wait_for(pilot, PlanScreen)
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+    assert not git.state(repo).merging
+    assert sh(repo, "log", "-1", "--format=%P").count(" ") == 1
+
+
+async def test_finish_rebase_continues_it(repo):
+    _login_branch(repo, "a.txt", "login version\n")
+    sh(repo, "switch", "-q", "login")
+    (repo / "b.txt").write_text("b\n"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "login second")
+    sh(repo, "switch", "-q", "main")
+    (repo / "a.txt").write_text("main version\n"); sh(repo, "commit", "-qam", "main edit")
+    sh(repo, "switch", "-q", "login")
+    assert not git.run(["rebase", "main"], repo).ok
+    (repo / "a.txt").write_text("both versions\n")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        menu = app.query_one("#menu")
+        ids = [menu.get_option_at_index(i).id for i in range(menu.option_count)]
+        assert "finish_merge" in ids and "branch_here" not in ids
+        await choose(pilot, "finish_merge")
+        plan_screen = await wait_for(pilot, PlanScreen)
+        assert [st.args for st in plan_screen.plan.steps] == [["add", "--all"], ["rebase", "--continue"]]
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+    s = git.state(repo)
+    assert not s.rebasing and s.branch == "login"
+    assert sh(repo, "log", "--format=%s").splitlines() == ["login second", "login form", "main edit", "first"]
+
+
+async def test_background_fetch_shows_new_commits(remote_pair, monkeypatch):
+    monkeypatch.setenv("GITLY_AUTO_FETCH", "1")
+    repo, other = remote_pair
+    (other / "o.txt").write_text("o"); sh(other, "add", "."); sh(other, "commit", "-qm", "o"); sh(other, "push", "-q")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app.repo.behind == 1
+        summary = str(app.query_one("#summary").render())
+        assert "GitHub has 1 commit you don't" in summary and "checked GitHub just now" in summary
+        assert app.suggestion.kind == "pull"
+    assert sh(repo, "log", "--format=%s").splitlines() == ["first"]  # fetch only, nothing merged
+
+
+async def test_background_fetch_failure_is_quiet(repo, monkeypatch):
+    monkeypatch.setenv("GITLY_AUTO_FETCH", "1")
+    sh(repo, "remote", "add", "origin", str(repo.parent / "missing.git"))
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "couldn't reach GitHub just now" in str(app.query_one("#summary").render())
+        assert app.screen is app.screen_stack[0]  # no error dialog

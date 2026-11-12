@@ -145,3 +145,22 @@ def test_gitignore_step(repo):
     assert (repo / ".gitignore").read_text() == "dist/\n\n# Added by gitly: keep these out of your saves\n.env\n"
     assert Step([], "x", gitignore=["ok", "bad\nline"]).blocked
     assert Step([], "x", gitignore=[".env"]).display == "add to .gitignore: .env"
+
+
+def _conflict(repo):
+    sh(repo, "switch", "-qc", "login")
+    (repo / "a.txt").write_text("login version\n"); sh(repo, "commit", "-qam", "login edit")
+    sh(repo, "switch", "-q", "main")
+    (repo / "a.txt").write_text("main version\n"); sh(repo, "commit", "-qam", "main edit")
+    assert not git.run(["merge", "login"], repo).ok
+
+
+def test_leftover_markers(repo):
+    _conflict(repo)
+    (repo / "notes.md").write_text("Install\n=======\n")  # a heading, not a conflict
+    assert precheck.leftover_markers(git.state(repo)) == [("a.txt", 1)]
+    # Still caught after the file is marked as resolved without being fixed.
+    sh(repo, "add", "--all")
+    assert precheck.leftover_markers(git.state(repo)) == [("a.txt", 1)]
+    (repo / "a.txt").write_text("both versions\n")
+    assert precheck.leftover_markers(git.state(repo)) == []

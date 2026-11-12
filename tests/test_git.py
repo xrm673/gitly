@@ -168,3 +168,12 @@ def test_tidy_branch_name(repo):
         got = git.tidy_branch_name(typed)
         assert got == want, typed
         assert not got or git.valid_branch_name(repo, got)
+
+
+def test_fetch_sees_commits_from_others(remote_pair):
+    repo, other = remote_pair
+    (other / "o.txt").write_text("o"); sh(other, "add", "."); sh(other, "commit", "-qm", "o"); sh(other, "push", "-q")
+    assert git.state(repo).behind == 0  # not known until we fetch
+    assert git.fetch(repo).ok
+    assert git.state(repo).behind == 1
+    assert not (repo / "o.txt").exists()
