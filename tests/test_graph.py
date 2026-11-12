@@ -336,3 +336,18 @@ def test_selected_row_label_is_highlighted(repo):
     assert first.startswith(f"[b #0b0e14 on {graph.lane_color_for(g.lanes[row])}]")
     plain = Text.from_markup(graph.render(g, s, selected=(row, x))).plain.splitlines()
     assert plain == Text.from_markup(graph.render(g, s)).plain.splitlines()  # same layout, only colors
+
+
+def test_combining_save_is_joined_to_the_branch_it_brings_in(repo):
+    commit(repo, "second")
+    sh(repo, "switch", "-qc", "login")
+    commit(repo, "login form")
+    sh(repo, "switch", "-q", "main")
+    s = git.state(repo)
+    g = graph.build(s)
+    before = Text.from_markup(graph.render(g, s, compact=True)).plain.splitlines()
+    assert "╯" not in before[1]
+    after = Text.from_markup(graph.render(graph.after_merge(g, "login", "main"), s, compact=True)).plain
+    main_row, login_row = after.splitlines()[:2]
+    assert "●──╯" in login_row  # login's line turns up into main's new save
+    assert main_row.index("◉") == login_row.index("╯")

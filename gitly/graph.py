@@ -548,6 +548,27 @@ def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
             glyph[r][start - 1] = "┄"
             link[r][start - 1] = "┄┄"
 
+    here_row = next((r for r, lane in enumerate(g.lanes) if _here(lane, g)), None)
+    # A combining save pulls in another row's latest save: draw that row's line
+    # over to it, so you can see where the work went.
+    for r, lane in enumerate(g.lanes):
+        for c in lane.commits:
+            src = row_of.get(c.parents[1]) if c.is_merge else None
+            if src is None or src == r or src not in ends or g.lanes[src].commits[-1].sha != c.parents[1]:
+                continue  # not on the map, or that branch went on after being combined
+            x = col[c.sha]
+            if ends[src] >= x or (src == here_row and ghost.saves):
+                continue
+            for xx in range(ends[src], x):
+                link[src][xx] = "──"
+                if xx > ends[src]:
+                    glyph[src][xx] = "┼" if glyph[src][xx] == "│" else "─"
+            glyph[src][x] = "╯" if r < src else "╮"
+            lo, hi = sorted((src, r))
+            for rr in range(lo + 1, hi):
+                glyph[rr][x] = {" ": "│", "─": "┼"}.get(glyph[rr][x], glyph[rr][x])
+                color[rr][x] = color[src][x]
+
     if merge and merge[0] in ends and merge[1] in ends:
         src, dst = merge
         last = ncols - 1
@@ -566,7 +587,6 @@ def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
         faint.update((rr, last) for rr in range(lo, hi + 1))
     else:
         merge = None
-    here_row = next((r for r, lane in enumerate(g.lanes) if _here(lane, g)), None)
     if ghost.saves and not ghost.branch and here_row in ends:
         for x in range(ends[here_row], ends[here_row] + ghost.saves):
             link[here_row][x] = "╌╌"
