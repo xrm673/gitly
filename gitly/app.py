@@ -349,6 +349,8 @@ class BranchMap(Vertical, can_focus=True):
         self.cells: list[list[tuple[int, str]]] = []
         self.sel: tuple[int, int] | None = None  # (lane index, index into its cells)
         self.held: str | None = None  # branch picked up with Space, to combine into another
+        # On the faint "new branch" row under where you are (self.sel keeps the row above it).
+        self.on_new = False
         self.ghost: graph.Ghost | None = None  # the suggested next step, drawn faintly
 
     def compose(self) -> ComposeResult:
@@ -434,19 +436,49 @@ class BranchMap(Vertical, can_focus=True):
         r, i = self.sel
         return self.g.lanes[r], self.cells[r][i][1]
 
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        # On the new-branch row there's no save to combine or undo: dim those keys.
+        if self.on_new and action in ("pick_up", "undo"):
+            return None
+        return True
+
+    def _plain_trunk(self) -> bool:
+        """On the main branch, with nothing half-done: show the "+ new branch" row."""
+        s, g = self.s, self.g
+        return bool(s and g and s.branch and s.branch == g.trunk and not s.detached
+                    and not (s.conflicts or s.merging or s.rebasing or s.reverting))
+
+    def _new_anchor(self) -> int | None:
+        """The row the new-branch row hangs under (where you are), if there is one."""
+        if self.g is None or not ((self.ghost and self.ghost.branch) or self._plain_trunk()):
+            return None
+        r = next((r for r, lane in enumerate(self.g.lanes) if graph._here(lane, self.g)), None)
+        return r if r is not None and self.cells[r] else None
+
     def _draw(self, focused: bool | None = None) -> None:
         if self.g is None or self.s is None:
             return
         focused = self.has_focus if focused is None else focused
-        cell = (self.sel[0], self.cells[self.sel[0]][self.sel[1]][0]) if self.sel and focused else None
+        if self._new_anchor() is None:
+            self.on_new = False
+        on_new = self.on_new and focused
+        cell = (self.sel[0], self.cells[self.sel[0]][self.sel[1]][0]) if self.sel and focused and not on_new else None
         self.query_one("#map", Static).update(graph.render(
             self.g, self.s, selected=cell, held=self.held, ghost=self.ghost,
-            max_width=self.query_one("#map-wrap").size.width or None))
+            max_width=self.query_one("#map-wrap").size.width or None,
+            new_row=self._plain_trunk(), new_selected=on_new))
+        self.refresh_bindings()  # the footer dims Combine / Undo on the new-branch row
         self.query_one("#map-detail", Static).update(
             self._detail() if focused else
             "[b]←[/] [dim]pick a save, then branch from it, switch, combine or undo[/]")
 
     def _detail(self) -> str:
+        if self.on_new:
+            if self.ghost and self.ghost.branch:
+                return (f"[b]{escape(self.ghost.branch)}[/] [dim]· a new branch, suggested · "
+                        "Enter starts it[/]")
+            return (f"[b]New branch[/] [dim]· Enter starts one from your latest save on "
+                    f"{escape(self.s.branch or '')}[/]")
         sel = self.selected()
         if sel is None:
             return "[dim]Nothing to select yet.[/]"
@@ -469,24 +501,44 @@ class BranchMap(Vertical, can_focus=True):
     def action_move(self, dr: int, dc: int) -> None:
         # → past a branch's latest save goes on to the menu on the right (not while carrying
         # a branch: leaving the map puts it down).
-        at_right_edge = self.sel is None or self.sel[1] == len(self.cells[self.sel[0]]) - 1
+        at_right_edge = (self.on_new or self.sel is None
+                         or self.sel[1] == len(self.cells[self.sel[0]]) - 1)
         if dc > 0 and at_right_edge and not self.held:
             self.screen.query_one("#menu").focus()
             return
         if self.sel is None:
             return
+        # The "new branch" row sits right under `anchor`; carrying a branch skips it.
+        anchor = None if self.held else self._new_anchor()
         r, i = self.sel
+        if self.on_new:
+            if dc:
+                return
+            if dr < 0:  # back up to the row it hangs under
+                self.on_new = False
+                r, i = anchor, len(self.cells[anchor]) - 1
+                self.sel = (r, i)
+                self._draw()
+                return
+            r = anchor  # going down: carry on from below it
         if dc:
             i = max(0, min(len(self.cells[r]) - 1, i + dc))
         else:
             rr = r + dr
             while 0 <= rr < len(self.cells) and not self.cells[rr]:
                 rr += dr
+            if anchor is not None and not self.on_new and (
+                    (dr > 0 and r == anchor) or (dr < 0 and rr == anchor)):
+                self.on_new = True
+                self.sel = (anchor, len(self.cells[anchor]) - 1)
+                self._draw()
+                return
             if not 0 <= rr < len(self.cells):
                 return
             # Up/down picks a branch, so land on its latest save (what Enter switches to);
             # left/right then walks back through older ones.
             r, i = rr, len(self.cells[rr]) - 1
+            self.on_new = False
         self.sel = (r, i)
         self._draw()
         # Keep the selected cell visible: rows start with a label, then 3 characters per column.
@@ -535,6 +587,9 @@ class BranchMap(Vertical, can_focus=True):
 
     @work(exclusive=True, group="map")
     async def action_new_branch(self) -> None:
+        if self.on_new:
+            await self._start_new()
+            return
         if reason := self._busy_reason():
             self.notify(reason, severity="warning")
             return
@@ -573,12 +628,33 @@ class BranchMap(Vertical, can_focus=True):
             self.screen.query_one("#menu").focus()
 
     def action_enter(self) -> None:
-        if self.held:
+        if self.on_new:
+            self.start_new_row()
+        elif self.held:
             self.combine()
         else:
             self.switch()
 
+    @work(exclusive=True, group="map")
+    async def start_new_row(self) -> None:
+        await self._start_new()
+
+    async def _start_new(self) -> None:
+        """Enter on the "new branch" row: take the suggested branch, or start one where you are."""
+        if self.ghost and self.ghost.branch:
+            self.app.log_.event("map_action", action="new_row", suggested=True)
+            self.app.handle("next")
+            return
+        if reason := self._busy_reason():
+            self.notify(reason, severity="warning")
+            return
+        self.app.log_.event("map_action", action="new_row", suggested=False)
+        await self.new_branch(self.s.head_sha)
+
     def action_pick_up(self) -> None:
+        if self.on_new:
+            self.notify("This branch doesn't exist yet. Press Enter to start it.")
+            return
         if reason := self._busy_reason():
             self.notify(reason, severity="warning")
             return
@@ -658,6 +734,9 @@ class BranchMap(Vertical, can_focus=True):
 
     @work(exclusive=True, group="map")
     async def action_undo(self) -> None:
+        if self.on_new:
+            self.notify("Nothing to undo here: this branch doesn't exist yet.")
+            return
         if reason := self._busy_reason():
             self.notify(reason, severity="warning")
             return

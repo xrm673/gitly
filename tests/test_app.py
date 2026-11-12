@@ -351,7 +351,7 @@ async def test_map_switch_carries_unsaved_changes(repo):
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await _open_map(pilot)
-        await pilot.press("down")
+        await pilot.press("down", "down")
         assert screen.selected()[0].name == "login"
         await pilot.press("enter")
         plan_screen = await wait_for(pilot, PlanScreen)
@@ -374,7 +374,7 @@ async def test_map_switch_saves_first_when_in_the_way(repo):
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
         await _open_map(pilot)
-        await pilot.press("down", "enter")
+        await pilot.press("down", "down", "enter")
         choose_screen = await wait_for(pilot, ChooseScreen)
         assert "a.txt" in str(choose_screen.query("Static")[1].render())
         await pilot.press("enter")  # save first
@@ -440,7 +440,7 @@ async def test_map_combine_branch(repo):
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await _open_map(pilot)
-        await pilot.press("down", "space")
+        await pilot.press("down", "down", "space")
         assert screen.held == "login"
         assert "Carrying login" in str(screen.query_one("#map-detail").render())
         await pilot.press("up", "enter")
@@ -474,7 +474,7 @@ async def test_map_combine_predicts_conflict(repo):
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
         await _open_map(pilot)
-        await pilot.press("down", "space", "up", "enter")
+        await pilot.press("down", "down", "space", "up", "enter")
         plan_screen = await wait_for(pilot, PlanScreen)
         assert "a.txt" in plan_screen.plan.note and "Both branches changed" in plan_screen.plan.note
         await pilot.press("escape")
@@ -487,7 +487,7 @@ async def test_map_esc_puts_branch_down(repo):
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await _open_map(pilot)
-        await pilot.press("down", "space", "escape")
+        await pilot.press("down", "down", "space", "escape")
         await pilot.pause()
         assert screen.held is None and app.focused is screen  # first Esc puts it down
         await pilot.press("escape")
@@ -550,7 +550,7 @@ async def test_map_undo_refuses_other_branch(repo):
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
         await _open_map(pilot)
-        await pilot.press("down", "u")
+        await pilot.press("down", "down", "u")
         await pilot.pause()
         await app.workers.wait_for_complete()
         assert not isinstance(app.screen, PlanScreen)
@@ -1015,11 +1015,33 @@ async def test_map_up_down_lands_on_latest_save(repo):
     app = Gitly(str(repo))
     async with app.run_test(size=(120, 40)) as pilot:
         bm = await _open_map(pilot)
-        await pilot.press("down")
+        await pilot.press("down", "down")
         lane, sha = bm.selected()
         assert lane.name == "login" and sha == lane.tip
         await pilot.press("left", "up", "down")
         assert bm.selected()[1] == lane.tip
+
+
+async def test_map_new_branch_row_on_main(repo):
+    _login_branch(repo)
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        bm = await _open_map(pilot)
+        assert "+ new branch" in str(bm.query_one("#map").render())
+        await pilot.press("down")  # main → the new-branch row right under it
+        assert bm.on_new and "New branch" in str(bm.query_one("#map-detail").render())
+        await pilot.press("down")  # → login
+        assert not bm.on_new and bm.selected()[0].name == "login"
+        await pilot.press("up", "up")  # back over the new row to main
+        assert not bm.on_new and bm.selected()[0].name == "main"
+        await pilot.press("down", "enter")
+        await wait_for(pilot, AskTextScreen)
+        await pilot.press(*"idea", "enter")
+        plan_screen = await wait_for(pilot, PlanScreen)
+        assert ["switch", "--create", "idea"] in [st.args for st in plan_screen.plan.steps]
+        await _run_plan_and_return(pilot)
+        assert "+ new branch" not in str(bm.query_one("#map").render())  # only shown on main
+    assert sh(repo, "branch", "--show-current").strip() == "idea"
 
 
 async def test_map_cursor_follows_a_new_save(repo):

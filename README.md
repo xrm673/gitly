@@ -120,7 +120,9 @@ Press `←` to move from the menu to the map (`Esc`, or `→` past a branch's
 latest save, goes back). Arrow keys then pick a save; the line under the map says what it is, and the footer
 lists the keys.
 
-- `n` starts a new branch from the selected save.
+- `n` starts a new branch from the selected save. On main there's also a faint
+  `+ new branch` row under it: move onto it and press `Enter` to start one from
+  where you are.
 - `Enter` switches to the selected branch.
 - `Space` picks up a branch; move to another branch's row and press `Enter` to
   combine it in (`git merge --no-ff`, so there's always one save to undo).

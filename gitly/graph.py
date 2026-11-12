@@ -489,7 +489,8 @@ def label_width(g: Graph) -> int:
 
 def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
            compact: bool = False, unsaved: int | None = None, held: str | None = None,
-           ghost: Ghost | None = None, max_width: int | None = None) -> str:
+           ghost: Ghost | None = None, max_width: int | None = None,
+           new_row: bool = False, new_selected: bool = False) -> str:
     """The map as Rich markup, one line per lane.
 
     selected: (lane index, column) to highlight. compact: only mark where you
@@ -497,6 +498,8 @@ def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
     held: branch picked up to combine into another (its label is highlighted).
     ghost: the suggested next step, drawn faintly (dashed lines, ◌ for saves
     that don't exist yet). max_width: shorten the notes after each row to fit.
+    new_row: draw a faint "+ new branch" row under where you are (a suggested
+    branch takes its place). new_selected: the cursor is on that row.
     """
     if not g.lanes:
         return "[dim]No saves yet. Use “Save my work” to make your first one.[/]"
@@ -596,6 +599,8 @@ def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
     width = label_width(g)
     if ghost.branch:
         width = max(width, min(len(ghost.branch) + 2, 20))
+    elif new_row:
+        width = max(width, len("+ new branch") + 3)  # + 1: room for the cursor's block
     lines = []
     for r, lane in enumerate(g.lanes):
         name = lane.name if len(lane.name) <= width - 2 else lane.name[: width - 3] + "…"
@@ -637,26 +642,39 @@ def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
         note = _note(lane, g, s, unsaved, compact, room=room,
                      tail=ghost.tails.get(lane.name) if lane.is_branch else None)
         lines.append(line + " " + note if note else line.rstrip())
-        if here and ghost.branch:
+        if here and (ghost.branch or new_row):
             lines.append(_ghost_branch(ghost, width, col.get(g.head or "", ends.get(r, 0)),
-                                       ncols, through.get(r, [])))
+                                       ncols, through.get(r, []), new_selected))
     if g.hidden_branches and not compact:
         lines.append(f"[dim]  … and {g.hidden_branches} more branch{'es' if g.hidden_branches != 1 else ''}[/]")
     return "\n".join(lines)
 
 
-def _ghost_branch(ghost: Ghost, width: int, at: int, ncols: int, through: list[tuple[int, str]]) -> str:
-    """The row for a branch that doesn't exist yet, growing out of column `at`."""
-    name = ghost.branch or ""
-    name = name if len(name) <= width - 2 else name[: width - 3] + "…"
+def _ghost_branch(ghost: Ghost, width: int, at: int, ncols: int, through: list[tuple[int, str]],
+                  selected: bool = False) -> str:
+    """The row for a branch that doesn't exist yet, growing out of column `at`.
+
+    Either the suggested one (ghost.branch) or, without a suggestion, an empty
+    "+ new branch" row to start one from. selected: the cursor is on it.
+    """
+    name = ghost.branch or "+ new branch"
+    room = width - 3 if selected else width - 2  # the cursor's block takes a column
+    name = name if len(name) <= room else name[: room - 1] + "…"
     lines_through = dict(through)
     cells = ""
     for x in range(at):
         cells += f"[{lines_through[x]}]│[/]  " if x in lines_through else "   "
-    stem = "╰" + ("╌╌◌" * ghost.saves or "╌╌")
+    saves = ghost.saves if ghost.branch else 0  # ◌ means suggested; this row only offers
+    stem = "╰" + ("╌╌◌" * saves or "╌╌")
     pad = " " * max(0, 3 * (ncols - at) - len(stem))  # line the note up with the other rows
-    return (f"[{GHOST}]{escape('  ' + name):<{width}}[/]{cells}"
-            f"[{GHOST}]{stem}{pad} new branch, suggested[/]")
+    note = "new branch, suggested" if ghost.branch else "start a new branch from here"
+    label = (f"[{SELECTED}]{escape('  ' + name):<{width - 1}}[/] " if selected
+             else f"[{GHOST}]{escape('  ' + name):<{width}}[/]")
+    if selected and stem.endswith("◌"):  # the cursor sits on the new branch's first dot
+        stem = f"[{GHOST}]{stem[:-1]}[/][{SELECTED}]◌[/]"
+    else:
+        stem = f"[{GHOST}]{stem}[/]"
+    return f"{label}{cells}{stem}[{GHOST}]{pad} {note}[/]"
 
 
 LEGEND_SHORT = "● save  ◆ combined  ○ only on GitHub  ◉ you  ◌ suggested"
