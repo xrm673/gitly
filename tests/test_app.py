@@ -138,7 +138,7 @@ async def test_save_prefills_ai_message(repo, tmp_path, monkeypatch):
             await pilot.pause(0.05)
             if isinstance(app.screen, AskTextScreen):
                 break
-        assert app.screen.query_one("Input").value == "Update a.txt"
+        assert app.screen.text == "Update a.txt"
         await pilot.press("enter")
         await pilot.pause()
         assert isinstance(app.screen, PlanScreen)
@@ -168,7 +168,7 @@ async def test_save_falls_back_when_ai_fails(repo, monkeypatch):
             if isinstance(app.screen, AskTextScreen):
                 break
         assert isinstance(app.screen, AskTextScreen)
-        assert app.screen.query_one("Input").value == ""
+        assert app.screen.text == ""
 
 
 async def test_explain_changes(repo, monkeypatch):
@@ -829,7 +829,7 @@ async def test_ai_description_is_reused_by_save(repo, monkeypatch):
         await app.workers.wait_for_complete()
         await pilot.pause()
         await choose(pilot, "save")  # the plain menu item, not the suggestion
-        assert (await wait_for(pilot, AskTextScreen)).query_one("Input").value == "Rewrite a.txt"
+        assert (await wait_for(pilot, AskTextScreen)).text == "Rewrite a.txt"
 
 
 async def test_ai_trouble_stays_out_of_the_way(repo, monkeypatch):

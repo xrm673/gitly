@@ -14,7 +14,9 @@ from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.theme import Theme
-from textual.widgets import Button, Footer, Input, LoadingIndicator, OptionList, Static
+from textual import events
+from textual.message import Message
+from textual.widgets import Button, Footer, Input, LoadingIndicator, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from . import actions, ai, git, graph, precheck, rescue, safety, suggest
@@ -65,27 +67,73 @@ class ChooseScreen(ModalScreen):
         self.dismiss(event.option.id)
 
 
+class WrapInput(TextArea):
+    """One line of text, wrapped over several rows so a long one can be read from the start.
+
+    Enter submits instead of starting a new line; pasted line breaks become spaces.
+    """
+
+    DEFAULT_CSS = "WrapInput { height: auto; max-height: 6; }"
+
+    class Submitted(Message):
+        def __init__(self, value: str) -> None:
+            super().__init__()
+            self.value = value
+
+    def __init__(self, value: str = "", placeholder: str = "") -> None:
+        super().__init__(value, soft_wrap=True, show_line_numbers=False,
+                         highlight_cursor_line=False, placeholder=placeholder)
+
+    @property
+    def value(self) -> str:
+        return " ".join(self.text.split("\n"))
+
+    def on_mount(self) -> None:
+        self.move_cursor((0, 0))  # show the beginning, not the end
+
+    async def _on_key(self, event: events.Key) -> None:
+        if event.key == "enter":
+            event.stop()
+            event.prevent_default()
+            self.post_message(self.Submitted(self.value))
+            return
+        await super()._on_key(event)
+
+
 class AskTextScreen(ModalScreen):
-    """Ask for one line of text. Returns the text or None."""
+    """Ask for one line of text. Returns the text or None.
+
+    multiline: wrap the text over a few rows (for long ones, like a save description).
+    """
 
     BINDINGS = [Binding("escape", "dismiss(None)", "Cancel")]
 
     def __init__(self, title: str, placeholder: str = "", hint: str = "", value: str = "",
-                 password: bool = False):
+                 password: bool = False, multiline: bool = False):
         super().__init__()
         self.title_text, self.placeholder, self.hint, self.value = title, placeholder, hint, value
         self.password = password
+        self.multiline = multiline and not password
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
             yield Static(f"[b]{escape(self.title_text)}[/]", classes="dialog-title")
             if self.hint:
                 yield Static(self.hint, classes="muted")
-            yield Input(value=self.value, placeholder=self.placeholder, password=self.password)
+            if self.multiline:
+                yield WrapInput(self.value, placeholder=self.placeholder)
+            else:
+                yield Input(value=self.value, placeholder=self.placeholder, password=self.password)
             yield Static("[dim]Enter to continue · Esc to cancel[/]")
 
+    @property
+    def text(self) -> str:
+        """What's typed in the box right now."""
+        return self.query_one(WrapInput if self.multiline else Input).value
+
     @on(Input.Submitted)
-    def submitted(self, event: Input.Submitted) -> None:
+    @on(WrapInput.Submitted)
+    def submitted(self, event: Input.Submitted | WrapInput.Submitted) -> None:
         self.dismiss(event.value.strip() or None)
 
 
@@ -744,7 +792,7 @@ class Gitly(App):
     .dialog-title { margin-bottom: 1; }
     .dialog OptionList { border: none; background: transparent; padding: 0; }
     .dialog OptionList { height: auto; max-height: 16; margin: 1 0; }
-    .dialog Input { margin: 1 0; }
+    .dialog Input, .dialog WrapInput { margin: 1 0; }
     .plan-body { height: auto; max-height: 24; }
     .step { margin: 0 0 1 0; }
     .note { margin-bottom: 1; }
@@ -1270,7 +1318,8 @@ class Gitly(App):
         if suggestion:
             hint = "The AI suggested this from your changes. Edit it, or press Enter to keep it."
         msg = await self.push_screen_wait(AskTextScreen(
-            "Save my work", placeholder="e.g. add login page", hint=hint, value=suggestion))
+            "Save my work", placeholder="e.g. add login page", hint=hint, value=suggestion,
+            multiline=True))
         if suggestion:
             self.log_.event("ai_commit_message_choice",
                             choice="cancelled" if not msg else "kept" if msg == suggestion else "edited")
