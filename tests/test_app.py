@@ -138,7 +138,7 @@ async def test_save_prefills_ai_message(repo, tmp_path, monkeypatch):
             await pilot.pause(0.05)
             if isinstance(app.screen, AskTextScreen):
                 break
-        assert app.screen.query_one("Input").value == "Update a.txt"
+        assert app.screen.text == "Update a.txt"
         await pilot.press("enter")
         await pilot.pause()
         assert isinstance(app.screen, PlanScreen)
@@ -168,7 +168,7 @@ async def test_save_falls_back_when_ai_fails(repo, monkeypatch):
             if isinstance(app.screen, AskTextScreen):
                 break
         assert isinstance(app.screen, AskTextScreen)
-        assert app.screen.query_one("Input").value == ""
+        assert app.screen.text == ""
 
 
 async def test_explain_changes(repo, monkeypatch):
@@ -255,8 +255,8 @@ async def test_branch_map_on_home_screen(repo):
         bm = app.query_one(BranchMap)
         text = str(bm.query_one("#map").render())
         assert "login" in text and "you are here" in text  # visible without opening anything
-        assert app.focused.id == "menu" and "Tab" in str(bm.query_one("#map-detail").render())
-        await pilot.press("tab")
+        assert app.focused.id == "menu" and "←" in str(bm.query_one("#map-detail").render())
+        await pilot.press("left")
         assert app.focused is bm and "login form" in str(bm.query_one("#map-detail").render())
         await pilot.press("escape")
         assert app.focused.id == "menu"
@@ -279,6 +279,34 @@ async def test_branch_map_keeps_selection_on_refresh(repo):
         sh(repo, "branch", "other")  # a branch appears: rebuild, selection stays put
         app.refresh_state(keep_highlight=True)
         assert bm.g is not built and bm.selected()[1] == picked
+
+
+async def test_arrows_move_between_map_and_menu(repo):
+    (repo / "b.txt").write_text("b"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "second")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        bm = await _open_map(pilot)
+        menu = app.query_one("#menu")
+        await pilot.press("left")  # an older save: → walks back to the newest, stays on the map
+        await pilot.press("right")
+        assert app.focused is bm
+        await pilot.press("right")  # past the newest save: over to the menu
+        assert app.focused is menu
+        await pilot.press("left")
+        assert app.focused is bm
+
+
+async def test_tab_takes_next_step_from_anywhere(repo):
+    (repo / "a.txt").write_text("edited\n")  # unsaved work: the next step is to save it
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _open_map(pilot)
+        assert app.suggestion.kind == "save"
+        await pilot.press("tab")
+        dialog = await wait_for(pilot, AskTextScreen)
+        await pilot.press("tab")  # inside a dialog, Tab only moves focus
+        await pilot.pause()
+        assert app.screen is dialog and len(app.screen_stack) == 2
 
 
 async def wait_for(pilot, cls, tries=60):
@@ -386,7 +414,7 @@ async def _open_map(pilot):
     """Focus the branch map panel on the home screen."""
     from gitly.app import BranchMap
     await pilot.pause()
-    await pilot.press("tab")
+    await pilot.press("left")
     bm = pilot.app.query_one(BranchMap)
     assert pilot.app.focused is bm
     return bm
@@ -680,7 +708,9 @@ async def test_nothing_to_save_is_greyed_out(remote_pair):
         await pilot.pause()
         menu = app.query_one("#menu")
         assert "all caught up" in text_of(app, "#next-title") and "next" not in menu_ids(app)
-        assert menu.get_option("save").disabled and menu.highlighted_option.id == "upload"
+        assert menu.get_option("save").disabled and menu.get_option("upload").disabled
+        assert "nothing to upload" in str(menu.get_option("upload").prompt)
+        assert menu.highlighted_option.id == "pull"
         (repo / "a.txt").write_text("edited\n")
         app.refresh_state(keep_highlight=True)
         assert not menu.get_option("save").disabled and menu_ids(app)[0] == "next"
@@ -801,7 +831,7 @@ async def test_ai_description_is_reused_by_save(repo, monkeypatch):
         await app.workers.wait_for_complete()
         await pilot.pause()
         await choose(pilot, "save")  # the plain menu item, not the suggestion
-        assert (await wait_for(pilot, AskTextScreen)).query_one("Input").value == "Rewrite a.txt"
+        assert (await wait_for(pilot, AskTextScreen)).text == "Rewrite a.txt"
 
 
 async def test_ai_trouble_stays_out_of_the_way(repo, monkeypatch):

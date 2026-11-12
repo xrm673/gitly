@@ -13,7 +13,7 @@ always shows you the exact command before anything runs.
  │ ✦ Save as 2 separate saves           │ │ ❯ ✦ Save as 2 separate saves  │
  │   Your changes touch the login form  │ │     suggested next step       │
  │   and, separately, a payments file.  │ │   ─────────────────────────   │
- ╰── ✦ suggested by AI · Enter: do it ──╯ │   Save my work  (2 files)     │
+ ╰─── ✦ suggested by AI · Tab: do it ──╯ │   Save my work  (2 files)     │
  ╭ Changes ─────────────────────────────╮ │   What did I change?          │
  │ modified  login.py                   │ │   Upload to GitHub            │
  │ new       pay.py                     │ │   Get latest                  │
@@ -74,8 +74,9 @@ a risk level. You see the plan and confirm it before anything runs.
 
 **Next step.** The top of the home screen always says what to do next, and
 why: save your work, upload it, get the latest, combine a finished branch,
-delete one that's already combined. It's the first item in the menu, so
-`Enter` does it (you still review the plan first) and `x` skips it. The same
+delete one that's already combined. `Tab` does it from anywhere on the home
+screen (you still review the plan first), and since it's the first item in the
+menu, `Enter` there does it too; `x` skips it. The same
 step is drawn faintly on the branch map, like autocomplete in an editor: `◌`
 is a save that doesn't exist yet, a dashed line is where a branch would go.
 
@@ -115,8 +116,8 @@ save's description, so the dots aren't anonymous. It's a simplified view, not a
 full commit graph: each branch shows its last few saves of its own. See
 `gitly/graph.py`.
 
-Press `Tab` to move from the menu to the map (and `Esc` to go back). Arrow
-keys then pick a save; the line under the map says what it is, and the footer
+Press `←` to move from the menu to the map (`Esc`, or `→` past a branch's
+latest save, goes back). Arrow keys then pick a save; the line under the map says what it is, and the footer
 lists the keys.
 
 - `n` starts a new branch from the selected save.

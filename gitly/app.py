@@ -14,7 +14,9 @@ from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.theme import Theme
-from textual.widgets import Button, Footer, Input, LoadingIndicator, OptionList, Static
+from textual import events
+from textual.message import Message
+from textual.widgets import Button, Footer, Input, LoadingIndicator, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from . import actions, ai, git, graph, precheck, rescue, safety, suggest
@@ -65,27 +67,73 @@ class ChooseScreen(ModalScreen):
         self.dismiss(event.option.id)
 
 
+class WrapInput(TextArea):
+    """One line of text, wrapped over several rows so a long one can be read from the start.
+
+    Enter submits instead of starting a new line; pasted line breaks become spaces.
+    """
+
+    DEFAULT_CSS = "WrapInput { height: auto; max-height: 6; }"
+
+    class Submitted(Message):
+        def __init__(self, value: str) -> None:
+            super().__init__()
+            self.value = value
+
+    def __init__(self, value: str = "", placeholder: str = "") -> None:
+        super().__init__(value, soft_wrap=True, show_line_numbers=False,
+                         highlight_cursor_line=False, placeholder=placeholder)
+
+    @property
+    def value(self) -> str:
+        return " ".join(self.text.split("\n"))
+
+    def on_mount(self) -> None:
+        self.move_cursor((0, 0))  # show the beginning, not the end
+
+    async def _on_key(self, event: events.Key) -> None:
+        if event.key == "enter":
+            event.stop()
+            event.prevent_default()
+            self.post_message(self.Submitted(self.value))
+            return
+        await super()._on_key(event)
+
+
 class AskTextScreen(ModalScreen):
-    """Ask for one line of text. Returns the text or None."""
+    """Ask for one line of text. Returns the text or None.
+
+    multiline: wrap the text over a few rows (for long ones, like a save description).
+    """
 
     BINDINGS = [Binding("escape", "dismiss(None)", "Cancel")]
 
     def __init__(self, title: str, placeholder: str = "", hint: str = "", value: str = "",
-                 password: bool = False):
+                 password: bool = False, multiline: bool = False):
         super().__init__()
         self.title_text, self.placeholder, self.hint, self.value = title, placeholder, hint, value
         self.password = password
+        self.multiline = multiline and not password
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
             yield Static(f"[b]{escape(self.title_text)}[/]", classes="dialog-title")
             if self.hint:
                 yield Static(self.hint, classes="muted")
-            yield Input(value=self.value, placeholder=self.placeholder, password=self.password)
+            if self.multiline:
+                yield WrapInput(self.value, placeholder=self.placeholder)
+            else:
+                yield Input(value=self.value, placeholder=self.placeholder, password=self.password)
             yield Static("[dim]Enter to continue · Esc to cancel[/]")
 
+    @property
+    def text(self) -> str:
+        """What's typed in the box right now."""
+        return self.query_one(WrapInput if self.multiline else Input).value
+
     @on(Input.Submitted)
-    def submitted(self, event: Input.Submitted) -> None:
+    @on(WrapInput.Submitted)
+    def submitted(self, event: Input.Submitted | WrapInput.Submitted) -> None:
         self.dismiss(event.value.strip() or None)
 
 
@@ -256,8 +304,17 @@ class ThinkingScreen(ModalScreen):
             yield LoadingIndicator()
 
 
+class Menu(OptionList):
+    """The home screen's action menu. ← goes over to the branch map on its left."""
+
+    BINDINGS = [Binding("left", "to_map", "Branch map", show=False)]
+
+    def action_to_map(self) -> None:
+        self.screen.query_one("#branchmap").focus()
+
+
 class BranchMap(Vertical, can_focus=True):
-    """The branch map panel on the home screen. Tab focuses it.
+    """The branch map panel on the home screen. ← from the menu focuses it.
 
     While focused, arrow keys pick a save. n: new branch here · Enter: switch ·
     Space then Enter: combine one branch into another · u: undo a save ·
@@ -387,7 +444,7 @@ class BranchMap(Vertical, can_focus=True):
             max_width=self.query_one("#map-wrap").size.width or None))
         self.query_one("#map-detail", Static).update(
             self._detail() if focused else
-            "[b]Tab[/] [dim]pick a save, then branch from it, switch, combine or undo[/]")
+            "[b]←[/] [dim]pick a save, then branch from it, switch, combine or undo[/]")
 
     def _detail(self) -> str:
         sel = self.selected()
@@ -410,6 +467,12 @@ class BranchMap(Vertical, can_focus=True):
         return head  # the keys are listed in the footer
 
     def action_move(self, dr: int, dc: int) -> None:
+        # → past a branch's latest save goes on to the menu on the right (not while carrying
+        # a branch: leaving the map puts it down).
+        at_right_edge = self.sel is None or self.sel[1] == len(self.cells[self.sel[0]]) - 1
+        if dc > 0 and at_right_edge and not self.held:
+            self.screen.query_one("#menu").focus()
+            return
         if self.sel is None:
             return
         r, i = self.sel
@@ -729,7 +792,7 @@ class Gitly(App):
     .dialog-title { margin-bottom: 1; }
     .dialog OptionList { border: none; background: transparent; padding: 0; }
     .dialog OptionList { height: auto; max-height: 16; margin: 1 0; }
-    .dialog Input { margin: 1 0; }
+    .dialog Input, .dialog WrapInput { margin: 1 0; }
     .plan-body { height: auto; max-height: 24; }
     .step { margin: 0 0 1 0; }
     .note { margin-bottom: 1; }
@@ -742,6 +805,9 @@ class Gitly(App):
     LoadingIndicator { height: 3; }
     """
     BINDINGS = [
+        # Like accepting autocomplete: Tab takes the suggested next step from anywhere on the
+        # home screen. In dialogs it still moves between fields.
+        Binding("tab", "take_next", "Do next step", show=False, priority=True),
         Binding("question_mark", "ask", "Ask in plain English"),
         Binding("x", "not_now", "Skip suggestion"),
         Binding("r", "refresh", "Refresh"),
@@ -787,14 +853,14 @@ class Gitly(App):
                     yield Static(id="next-reason")
                 yield VerticalScroll(Static(id="filelist"), id="files")
                 yield BranchMap(id="branchmap")
-            yield OptionList(id="menu")
+            yield Menu(id="menu")
         yield Footer()
 
     def on_mount(self) -> None:
         self.log_.event("start", cwd=self.cwd, ai_available=ai.available(), model=ai.MODEL)
         files = self.home.query_one("#files")
         files.border_title = "Changes"
-        files.can_focus = False  # Tab moves between the menu and the branch map
+        files.can_focus = False  # ← → move between the branch map and the menu
         self.home.query_one("#menu").border_title = "What do you want to do?"
         self.refresh_state()
         self.home.query_one("#menu").focus()
@@ -909,12 +975,16 @@ class Gitly(App):
                      ("back_to_branch", "Go back to my branch"), None]
         n = len(seen) + len(s.untracked)
         save_hint = f"  [dim]({n} file{'s' if n != 1 else ''})[/]" if n else "  [dim](nothing to save)[/]"
-        up_hint = f"  [dim]({s.ahead} new)[/]" if s.ahead else ""
+        # Nothing to upload: on GitHub already, with no saves of ours it lacks. (No GitHub yet,
+        # or a branch never uploaded, keeps it on: the plan explains or makes the first upload.)
+        up_to_date = bool(s.remotes and s.branch and s.upstream and not s.ahead)
+        up_hint = (f"  [dim]({s.ahead} new)[/]" if s.ahead
+                   else "  [dim](nothing to upload)[/]" if up_to_date else "")
         pull_hint = f"  [dim]({s.behind} waiting)[/]" if s.behind else ""
         menu += [
             ("save", "Save my work" + save_hint, not n),  # greyed out while there's nothing to save
             *([("explain", "What did I change?")] if s.dirty else []),
-            ("upload", "Upload to GitHub" + up_hint),
+            ("upload", "Upload to GitHub" + up_hint, up_to_date),
             ("pull", "Get latest" + pull_hint),
             None,
             ("branches", "Branches…"),
@@ -954,7 +1024,7 @@ class Gitly(App):
             panel.border_subtitle = f"[{AI_COLOR}]✦[/] from the AI" if ai_made else ""
         else:
             panel.border_subtitle = ((f"[{AI_COLOR}]✦[/] suggested by AI · " if ai_made else "")
-                                     + "Enter: do it · x: not now")
+                                     + "Tab: do it · x: not now")
         self.home.query_one("#aistatus", Static).update(
             f"[{AI_COLOR}]✦[/] [dim]AI suggestions on[/]" if suggest.ambient() and self._ai_failures < 3
             else "[dim]✦ AI on request[/]" if ai.available()
@@ -1010,6 +1080,17 @@ class Gitly(App):
             self._ai_last = time.monotonic()
         if not self.busy and self.screen is self.screen_stack[0]:
             self.refresh_state(keep_highlight=True)
+
+    def action_take_next(self) -> None:
+        if self.screen is not self.screen_stack[0]:
+            self.screen.focus_next()  # a dialog: Tab keeps its usual meaning
+            return
+        sg = self.suggestion
+        if sg is None or not sg.acceptable or self.busy:
+            self.bell()
+            return
+        self.log_.event("menu", choice="next", via="tab")
+        self.handle("next")
 
     def action_not_now(self) -> None:
         sg = self.suggestion
@@ -1241,7 +1322,8 @@ class Gitly(App):
         if suggestion:
             hint = "The AI suggested this from your changes. Edit it, or press Enter to keep it."
         msg = await self.push_screen_wait(AskTextScreen(
-            "Save my work", placeholder="e.g. add login page", hint=hint, value=suggestion))
+            "Save my work", placeholder="e.g. add login page", hint=hint, value=suggestion,
+            multiline=True))
         if suggestion:
             self.log_.event("ai_commit_message_choice",
                             choice="cancelled" if not msg else "kept" if msg == suggestion else "edited")
