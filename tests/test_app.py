@@ -888,3 +888,18 @@ async def test_map_enter_gets_github_only_branch(remote_pair):
         assert app.screen.plan.steps[-1].args == ["switch", "--track", "origin/login"]
         await _run_plan_and_return(pilot)
     assert sh(repo, "branch", "--show-current").strip() == "login"
+
+
+async def test_map_up_down_lands_on_latest_save(repo):
+    sh(repo, "switch", "-qc", "login")
+    for n in ("one", "two", "three"):
+        (repo / f"{n}.txt").write_text(n); sh(repo, "add", "."); sh(repo, "commit", "-qm", n)
+    sh(repo, "switch", "-q", "main")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        bm = await _open_map(pilot)
+        await pilot.press("down")
+        lane, sha = bm.selected()
+        assert lane.name == "login" and sha == lane.tip
+        await pilot.press("left", "up", "down")
+        assert bm.selected()[1] == lane.tip

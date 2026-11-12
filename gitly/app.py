@@ -408,13 +408,14 @@ class BranchMap(Vertical, can_focus=True):
         if dc:
             i = max(0, min(len(self.cells[r]) - 1, i + dc))
         else:
-            x = self.cells[r][i][0]
             rr = r + dr
             while 0 <= rr < len(self.cells) and not self.cells[rr]:
                 rr += dr
             if not 0 <= rr < len(self.cells):
                 return
-            r, i = rr, min(range(len(self.cells[rr])), key=lambda j: abs(self.cells[rr][j][0] - x))
+            # Up/down picks a branch, so land on its latest save (what Enter switches to);
+            # left/right then walks back through older ones.
+            r, i = rr, len(self.cells[rr]) - 1
         self.sel = (r, i)
         self._draw()
         # Keep the selected cell visible: rows start with a label, then 3 characters per column.
