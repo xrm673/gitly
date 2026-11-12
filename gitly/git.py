@@ -243,6 +243,42 @@ def branches(cwd: str | Path) -> list[str]:
     return [b for b in r.stdout.splitlines() if b]
 
 
+def github_branches(cwd: str | Path, merged_into: list[str] = ()) -> list[tuple[str, str]]:
+    """Branches that are on GitHub but not on this computer, newest first.
+
+    Returns (name, remote ref) pairs, e.g. ("login", "origin/login"). Branches
+    already combined into any of `merged_into` are left out: there's nothing in
+    them to look at. A name on several remotes is listed once (origin wins).
+    """
+    def remote_refs(*extra: str) -> list[str]:
+        r = run(["for-each-ref", "refs/remotes", "--sort=-committerdate",
+                 "--format=%(refname:short)%1f%(symref)", *extra], cwd)
+        return [line.split("\x1f")[0] for line in r.stdout.splitlines() if not line.split("\x1f")[1]]
+
+    local = run(["for-each-ref", "refs/heads", "--format=%(refname:short)%1f%(upstream:short)"], cwd)
+    names, tracked = set(), set()
+    for line in local.stdout.splitlines():
+        name, upstream = line.split("\x1f")
+        names.add(name)
+        tracked.add(upstream)
+    refs = remote_refs()
+    for base in merged_into:
+        keep = set(remote_refs(f"--no-merged={base}"))
+        refs = [r for r in refs if r in keep]
+    remotes = run(["remote"], cwd).stdout.split()
+    out: dict[str, str] = {}
+    for ref in refs:
+        remote = next((rm for rm in sorted(remotes, key=len, reverse=True) if ref.startswith(rm + "/")), None)
+        if remote is None or ref in tracked:
+            continue
+        name = ref[len(remote) + 1:]
+        if name in names or (name in out and remote != "origin"):
+            continue
+        out[name] = ref
+    order = {ref: i for i, ref in enumerate(refs)}
+    return sorted(out.items(), key=lambda kv: order[kv[1]])
+
+
 def files_changed(root: str | Path, *revs: str) -> set[str]:
     """Paths that differ between revisions, e.g. ("HEAD", "main") or ("main...login",)."""
     r = run(["diff", "--name-only", "--no-renames", "-z", *revs, "--"], root)

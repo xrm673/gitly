@@ -516,6 +516,9 @@ class BranchMap(Vertical, can_focus=True):
         elif lane.kind == "remote":
             self.notify("This row is GitHub's copy. Use “Get latest” on the main screen to bring it in.")
             return
+        elif lane.kind == "github":
+            self.notify(f"{lane.name} is only on GitHub. Press Enter on its row to get it first.")
+            return
         elif not lane.is_branch:
             self.notify("Only branches can be combined. Press n to make a branch here first.")
             return
@@ -590,7 +593,8 @@ class BranchMap(Vertical, can_focus=True):
         s, g = self.s, self.g
         c = g.commit(sha)
         if c is None or c.remote_only:
-            self.notify("That save is only on GitHub. Use “Get latest” first.")
+            self.notify(f"That save is only on GitHub. Press Enter on the {lane.name} row to get it first."
+                        if lane.kind == "github" else "That save is only on GitHub. Use “Get latest” first.")
             return
         if not await asyncio.to_thread(git.is_ancestor, s.root, sha, "HEAD"):
             self.notify(f"That save isn't part of the branch you're on. Switch to {lane.name} "
@@ -652,14 +656,16 @@ class BranchMap(Vertical, can_focus=True):
         if lane.kind == "remote":
             self.notify("This row is GitHub's copy. Use “Get latest” on the main screen to bring it in.")
             return
-        if not lane.is_branch:
+        github = lane.kind == "github"  # only on GitHub: switching gets a local copy
+        if not lane.is_branch and not github:
             self.notify("That's not a branch. Press n to start a branch there.")
             return
         if lane.current:
             self.notify(f"You're already on {lane.name}.")
             return
         s, g = self.s, self.g
-        blocking = await asyncio.to_thread(git.unsaved_in_the_way, s, lane.name)
+        target = lane.upstream if github else lane.name
+        blocking = await asyncio.to_thread(git.unsaved_in_the_way, s, target)
         ok, save = await self._make_room(blocking, f"'{lane.name}' has a different version")
         if not ok:
             return
@@ -667,8 +673,11 @@ class BranchMap(Vertical, can_focus=True):
         after = graph.after_switch(before, lane.name)
         carrying = 0 if save else self._unsaved()
         plan = actions.from_map(
-            "Switch branch", actions.switch_steps(lane.name, carrying),
-            summary=f"Move to '{lane.name}'.",
+            "Switch branch",
+            actions.switch_github_steps(lane.name, target, carrying) if github
+            else actions.switch_steps(lane.name, carrying),
+            summary=(f"Get '{lane.name}' from GitHub and move to it." if github
+                     else f"Move to '{lane.name}'."),
             preview=(graph.render(g, s, compact=True),
                      graph.render(after, s, compact=True, unsaved=carrying)),
             save_first=save)
@@ -1093,15 +1102,30 @@ class Gitly(App):
             if name:
                 return actions.new_branch(name)
         elif what in ("switch", "delete"):
-            if not others:
+            # Switching can also get a branch that's only on GitHub (deleting one there is another matter).
+            github = dict(self._github_branches(s)) if what == "switch" else {}
+            if not others and not github:
                 self.notify("There are no other branches.")
                 return None
+            options = [(b, escape(b)) for b in others]
+            options += [(f"github:{name}", f"{escape(name)}  [{graph.WARN}]⇣ only on GitHub[/]")
+                        for name in github]
             b = await self.push_screen_wait(ChooseScreen(
-                "Switch to…" if what == "switch" else "Delete which branch?",
-                [(b, escape(b)) for b in others]))
+                "Switch to…" if what == "switch" else "Delete which branch?", options))
+            if b and b.startswith("github:"):
+                name = b.removeprefix("github:")
+                return actions.switch_github(name, github[name])
             if b:
                 return actions.switch_branch(b) if what == "switch" else actions.delete_branch(b)
         return None
+
+    def _github_branches(self, s: git.RepoState) -> list[tuple[str, str]]:
+        """Branches only on GitHub, minus the ones already combined into the trunk (as on the map)."""
+        if not s.remotes:
+            return []
+        g = self.home.query_one(BranchMap).g
+        trunk = next((l for l in g.lanes if l.kind == "trunk"), None) if g else None
+        return git.github_branches(s.root, [x for x in (trunk and trunk.name, trunk and trunk.upstream) if x])
 
     async def undo_flow(self, s: git.RepoState) -> Plan | None:
         opts = []

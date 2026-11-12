@@ -51,7 +51,9 @@ class Commit:
 @dataclass
 class Lane:
     name: str
-    kind: str  # trunk | branch | remote | detached
+    # trunk | branch | remote (GitHub's copy of a branch that went its own way) |
+    # github (a branch only on GitHub; upstream is its remote ref) | detached
+    kind: str
     commits: list[Commit] = field(default_factory=list)  # oldest first
     fork: str | None = None  # sha (on another lane) this lane grows out of
     truncated: bool = False  # it has older commits of its own that aren't shown
@@ -221,8 +223,28 @@ def build(s: RepoState) -> Graph:
         revs = ["HEAD"] + ([f"^{trunk}"] if trunk in by_name else [])
         add(Lane("(no branch)", "detached", current=True, tip=s.head_sha), revs, PER_LANE)
 
-    # Show: trunk, then the current branch, then the rest; GitHub rows under their branch.
+    # Branches someone else made, only on GitHub so far. Ones already combined
+    # into the trunk (here or on GitHub) have nothing new to show, so they're left out.
+    github = []
+    if s.remotes:
+        t = by_name.get(trunk)
+        github = git.github_branches(root, [x for x in (trunk if t else None, t and t["upstream"]) if x])
+    room = max(0, MAX_BRANCHES - len(shown))
+    hidden += max(0, len(github) - room)
+    github = github[:room]
+    for name, ref in github:
+        sha = git.run(["rev-parse", ref], root).stdout.strip()
+        lane = Lane(name, "github", upstream=ref, tip=sha)
+        if sha in claimed:
+            lane.fork = sha
+            lanes.append(lane)
+        else:
+            add(lane, [ref] + ([f"^{trunk}"] if trunk in by_name else []), PER_LANE, remote_only=True)
+
+    # Show: trunk, then the current branch, then the rest, then branches only on
+    # GitHub; GitHub rows under their branch.
     rank = {b["name"]: i for i, b in enumerate(shown)}
+    rank.update({name: len(shown) + i for i, (name, _) in enumerate(github)})
 
     def display_key(lane: Lane) -> tuple:
         if lane.kind == "trunk" or lane.name == f"{trunk} on GitHub":
@@ -298,6 +320,10 @@ def after_switch(g: Graph, branch: str) -> Graph:
     """The graph once you've moved onto `branch`."""
     out = copy.deepcopy(g)
     for lane in out.lanes:
+        if lane.kind == "github" and lane.name == branch:  # getting it makes it a local branch
+            lane.kind, lane.behind, lane.ahead = "branch", 0, 0
+            for c in lane.commits:
+                c.remote_only = False
         lane.current = lane.is_branch and lane.name == branch
         if lane.current:
             out.head = lane.tip
@@ -418,6 +444,8 @@ def _note(lane: Lane, g: Graph, s: RepoState, unsaved: int, compact: bool,
         return _SEP.join(parts + ([lane.badge] if lane.badge else []))
     if lane.kind == "remote":
         parts.append("[dim]GitHub has saves you don't, and you have saves it doesn't[/]")
+    elif lane.kind == "github":
+        parts.append(f"[{WARN}]⇣ only on GitHub, not on this computer yet[/]")
     elif lane.kind == "detached":
         parts.append(f"[{WARN}]looking at an old save, not on a branch[/]")
     elif lane.merged:
@@ -445,7 +473,7 @@ def _note(lane: Lane, g: Graph, s: RepoState, unsaved: int, compact: bool,
         out.append(part)
         used += n
     # What the row is about: its latest save. Without this every row is just dots.
-    mine = [c for c in lane.commits if not c.remote_only]
+    mine = lane.commits if lane.kind == "github" else [c for c in lane.commits if not c.remote_only]
     if mine and lane.kind != "remote":
         age = ago(mine[-1].time)
         fits = SUBJECT_MAX if room is None else min(SUBJECT_MAX, room - used - (3 if out else 0) - len(age) - 3)
@@ -551,7 +579,7 @@ def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
     lines = []
     for r, lane in enumerate(g.lanes):
         name = lane.name if len(lane.name) <= width - 2 else lane.name[: width - 3] + "…"
-        label = ("▶ " if lane.current else "  ") + name
+        label = ("▶ " if lane.current else "⇣ " if lane.kind == "github" else "  ") + name
         bold = lane.current or (selected is not None and selected[0] == r)
         if held is not None and lane.is_branch and lane.name == held:
             label = f"[{SELECTED}]{escape(label):<{width}}[/]"
@@ -562,7 +590,8 @@ def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
         for x in range(ncols):
             ch, ln, colr = glyph[r][x], link[r][x], color[r][x]
             sha = next((c.sha for c in lane.commits if col[c.sha] == x), None)
-            style = "dim" if sha in remote or lane.kind == "remote" else colr
+            # A branch only on GitHub keeps its color: its ○ dots and ⇣ mark say where it is.
+            style = "dim" if (sha in remote and lane.kind != "github") or lane.kind == "remote" else colr
             if ch == "◉":
                 style = "b #ffffff"
             link_style = "dim" if lane.kind == "remote" else colr
