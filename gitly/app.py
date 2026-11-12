@@ -542,13 +542,55 @@ class BranchMap(Vertical, can_focus=True):
         self.sel = (r, i)
         self._draw()
         # Keep the selected cell visible: rows start with a label, then 3 characters per column.
-        label_w = graph.label_width(self.g)
+        label_w = self._label_w()
         cell_x = label_w + 3 * self.cells[r][i][0]
         wrap = self.query_one("#map-wrap")
         if cell_x + 3 > wrap.scroll_x + wrap.size.width:
             wrap.scroll_to(x=cell_x + 3 - wrap.size.width, animate=False)
         elif cell_x < wrap.scroll_x + label_w:
             wrap.scroll_to(x=max(0, cell_x - label_w), animate=False)
+
+    def _label_w(self) -> int:
+        return graph.row_label_width(self.g, self.ghost, self._plain_trunk())
+
+    # ---- mouse
+
+    def on_click(self, event: events.Click) -> None:
+        """Click a row (its name, dots or note) to move the cursor there, like ↑ ↓.
+
+        Clicking a dot picks that save. Clicking what's already selected acts like Enter.
+        """
+        if self.g is None or self.sel is None:
+            return
+        # The scroll area, not the text: a click past the end of a line still counts.
+        wrap = self.query_one("#map-wrap")
+        off = event.get_content_offset(wrap)
+        if off is None:
+            return
+        x, y = off.x + int(wrap.scroll_x), off.y + int(wrap.scroll_y)
+        lines = graph.line_rows(self.g, self.ghost, self._plain_trunk())
+        if not 0 <= y < len(lines):
+            return
+        row = lines[y]
+        was_focused, before = self.has_focus, (self.on_new, self.sel)
+        if row is None:  # the new-branch row
+            anchor = self._new_anchor()
+            if anchor is None or self.held:
+                return
+            self.on_new, self.sel = True, (anchor, len(self.cells[anchor]) - 1)
+        else:
+            cells = self.cells[row]
+            if not cells:
+                return
+            # On a dot: that save. Anywhere else on the row: the branch's latest save.
+            col = (x - self._label_w()) // 3
+            i = next((n for n, (c, _) in enumerate(cells) if c == col), len(cells) - 1)
+            self.on_new, self.sel = False, (row, i)
+        event.stop()
+        self.focus()
+        self._draw(focused=True)
+        if was_focused and (self.on_new, self.sel) == before:
+            self.action_enter()
 
     # ---- actions
 
@@ -1176,7 +1218,7 @@ class Gitly(App):
         if action == "take_next":
             sg = self.suggestion
             return (self.screen is self.screen_stack[0] and sg is not None and sg.acceptable
-                    and not self.busy) or None
+                    and not self.busy)  # False hides it (None would only dim it)
         return True
 
     def action_take_next(self) -> None:

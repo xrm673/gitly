@@ -1062,6 +1062,26 @@ async def test_map_new_branch_row_on_main(repo):
     assert sh(repo, "branch", "--show-current").strip() == "idea"
 
 
+async def test_map_rows_are_clickable(repo):
+    _login_branch(repo)
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        bm = app.query_one("#branchmap")
+        # Lines: main, + new branch, login.
+        await pilot.click("#map-wrap", offset=(60, 2))  # login's note, past its dots
+        assert app.focused is bm and not bm.on_new and bm.selected()[0].name == "login"
+        await pilot.click("#map-wrap", offset=(1, 0))  # main's name
+        assert bm.selected()[0].name == "main" and bm.selected()[1] == bm.selected()[0].tip
+        first_col, first_sha = bm.cells[0][0]
+        await pilot.click("#map-wrap", offset=(bm._label_w() + 3 * first_col, 0))  # main's oldest dot
+        assert bm.selected() == (bm.g.lanes[0], first_sha)
+        await pilot.click("#map-wrap", offset=(60, 1))  # "start a new branch from here"
+        assert bm.on_new
+        await pilot.click("#map-wrap", offset=(2, 1))  # clicking it again starts the branch
+        await wait_for(pilot, AskTextScreen)
+
+
 async def test_map_cursor_follows_a_new_save(repo):
     (repo / "b.txt").write_text("b"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "second")
     app = Gitly(str(repo))

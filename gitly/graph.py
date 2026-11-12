@@ -487,6 +487,26 @@ def label_width(g: Graph) -> int:
     return min(max((len(l.name) for l in g.lanes), default=0) + 2, 20)
 
 
+def row_label_width(g: Graph, ghost: Ghost | None = None, new_row: bool = False) -> int:
+    """Characters before the first dot in render(): the branch names, widened for a new-branch row."""
+    width = label_width(g)
+    if ghost and ghost.branch:
+        width = max(width, min(len(ghost.branch) + 2, 20))
+    elif new_row:
+        width = max(width, len("+ new branch") + 3)  # + 1: room for the cursor's block
+    return width
+
+
+def line_rows(g: Graph, ghost: Ghost | None = None, new_row: bool = False) -> list[int | None]:
+    """What each line of render() shows: a lane index, or None for the new-branch row."""
+    out: list[int | None] = []
+    for r, lane in enumerate(g.lanes):
+        out.append(r)
+        if _here(lane, g) and ((ghost and ghost.branch) or new_row):
+            out.append(None)
+    return out
+
+
 def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
            compact: bool = False, unsaved: int | None = None, held: str | None = None,
            ghost: Ghost | None = None, max_width: int | None = None,
@@ -596,11 +616,7 @@ def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
             glyph[here_row][x + 1] = "◌"
             faint.update({(here_row, x), (here_row, x + 1)})
 
-    width = label_width(g)
-    if ghost.branch:
-        width = max(width, min(len(ghost.branch) + 2, 20))
-    elif new_row:
-        width = max(width, len("+ new branch") + 3)  # + 1: room for the cursor's block
+    width = row_label_width(g, ghost, new_row)
     lines = []
     for r, lane in enumerate(g.lanes):
         name = lane.name if len(lane.name) <= width - 2 else lane.name[: width - 3] + "…"
