@@ -857,7 +857,8 @@ class Gitly(App):
     #next Static { height: auto; }
     #next-head { height: auto; }
     #next-title { width: 1fr; }
-    #next-key { width: auto; margin-left: 2; }
+    #next-key { width: auto; margin-right: 1; }
+    #next.keyed #next-reason { padding-left: 8; }  /* under the title, past the key cap */
     #next-reason { padding-left: 2; color: $text-muted; }
     OptionList > .option-list--option-highlighted { background: $primary 14%; color: $text; text-style: none; }
     OptionList:focus > .option-list--option-highlighted { background: $primary 30%; color: $text;
@@ -932,8 +933,8 @@ class Gitly(App):
             with Vertical(id="left"):
                 with Vertical(id="next"):
                     with Horizontal(id="next-head"):
-                        yield Static(id="next-title")
                         yield Static(id="next-key")  # a key cap: Tab takes the step
+                        yield Static(id="next-title")
                     yield Static(id="next-reason")
                 yield VerticalScroll(Static(id="filelist"), id="files")
                 yield BranchMap(id="branchmap")
@@ -1102,7 +1103,8 @@ class Gitly(App):
         panel.query_one("#next-reason", Static).update(escape(sg.reason))
         key = panel.query_one("#next-key", Static)
         key.display = sg.acceptable
-        key.update("[b #0b0e14 on $primary] Tab [/] [b]do it[/]")
+        key.update("[b #0b0e14 on $primary] Tab [/]")
+        panel.set_class(sg.acceptable, "keyed")
         self.refresh_bindings()  # the footer's "tab Do next step" follows the suggestion
         panel.set_class(not sg.acceptable, "quiet")
         panel.border_title = "Next step"
