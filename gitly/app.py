@@ -339,10 +339,18 @@ class BranchMap(Vertical, can_focus=True):
         sig = f"{s.head_sha} {s.branch}\n{git.refs_signature(s.root)}"
         if sig != self._sig or self.g is None:
             keep = self.selected()
+            # On a branch's latest save, the cursor follows the branch when it gets a new one;
+            # on an older save (picked with ← →), it stays put.
+            at_tip = keep is not None and self.sel[1] == len(self.cells[self.sel[0]]) - 1
             self.g = graph.build(s)
             self.cells = graph.positions(self.g)
             self._sig = sig
-            self.sel = ((keep and self._find(keep[1], lane=keep[0].name)) or self._find(s.head_sha)
+            follow = None
+            if at_tip:
+                row = next((r for r, l in enumerate(self.g.lanes)
+                            if l.name == keep[0].name and l.kind == keep[0].kind and self.cells[r]), None)
+                follow = (row, len(self.cells[row]) - 1) if row is not None else None
+            self.sel = (follow or (keep and self._find(keep[1], lane=keep[0].name)) or self._find(s.head_sha)
                         or next(((r, 0) for r, c in enumerate(self.cells) if c), None))
         self._draw()
 

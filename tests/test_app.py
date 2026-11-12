@@ -903,3 +903,20 @@ async def test_map_up_down_lands_on_latest_save(repo):
         assert lane.name == "login" and sha == lane.tip
         await pilot.press("left", "up", "down")
         assert bm.selected()[1] == lane.tip
+
+
+async def test_map_cursor_follows_a_new_save(repo):
+    (repo / "b.txt").write_text("b"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "second")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        bm = await _open_map(pilot)
+        assert bm.selected()[1] == bm.selected()[0].tip  # on main's latest save
+        (repo / "c.txt").write_text("c"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "third")
+        app.refresh_state(keep_highlight=True)
+        lane, sha = bm.selected()
+        assert lane.name == "main" and sha == sh(repo, "rev-parse", "HEAD").strip()
+        await pilot.press("left")  # an older save, picked on purpose, stays picked
+        picked = bm.selected()[1]
+        (repo / "d.txt").write_text("d"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "fourth")
+        app.refresh_state(keep_highlight=True)
+        assert bm.selected()[1] == picked
