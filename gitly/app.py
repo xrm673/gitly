@@ -749,6 +749,10 @@ class Gitly(App):
         self._ai_running = False
         self._ai_last = float("-inf")
         self._ai_failures = 0
+        # Background fetch, so "GitHub has N commits you don't" is true without a pull.
+        self._git_lock = asyncio.Lock()  # a fetch and a plan's steps never run at once
+        self._fetched_at: float | None = None  # last successful fetch (monotonic)
+        self._fetch_failed = False
 
     # ---- layout
 
@@ -777,10 +781,44 @@ class Gitly(App):
         self.refresh_state()
         self.home.query_one("#menu").focus()
         self.set_interval(3, self._poll)
+        self.fetch_remote()
+        self.set_interval(self.FETCH_EVERY, self.fetch_remote)
 
     def _poll(self) -> None:
         if not self.busy and self.screen is self.screen_stack[0]:
             self.refresh_state(keep_highlight=True, settle=True)
+
+    @staticmethod
+    def auto_fetch() -> bool:
+        """True when gitly checks GitHub in the background (GITLY_AUTO_FETCH=0 turns it off)."""
+        return os.environ.get("GITLY_AUTO_FETCH", "1").strip().lower() not in ("0", "false", "no", "off")
+
+    @work(group="fetch")
+    async def fetch_remote(self) -> None:
+        """Fetch in the background, then redraw: new commits on GitHub show up as "Get latest"."""
+        s = self.repo
+        if not self.auto_fetch() or s is None or not s.remotes or self._git_lock.locked():
+            return  # a plan is running (it may be a pull), or the last fetch hasn't finished
+        async with self._git_lock:
+            r = await asyncio.to_thread(git.fetch, s.root)
+        self._fetch_failed = not r.ok
+        if r.ok:
+            self._fetched_at = time.monotonic()
+        self.log_.event("fetch", ok=r.ok, seconds=round(r.seconds, 2),
+                        **({} if r.ok else {"stderr": r.stderr[-300:]}))
+        if not self.busy and self.screen is self.screen_stack[0]:
+            self.refresh_state(keep_highlight=True)
+
+    def _fetch_note(self, s: git.RepoState) -> str:
+        """How fresh "what GitHub has" is, after the header line."""
+        if not s.remotes or not self.auto_fetch():
+            return ""
+        if self._fetch_failed:
+            return "  [dim]· couldn't reach GitHub just now[/]"
+        if self._fetched_at is None:
+            return "  [dim]· checking GitHub…[/]"
+        mins = int((time.monotonic() - self._fetched_at) // 60)
+        return f"  [dim]· checked GitHub {'just now' if mins < 1 else f'{mins} min ago'}[/]"
 
     @property
     def home(self):
@@ -816,7 +854,7 @@ class Gitly(App):
             return
 
         top.update(f"[b $background on $accent] gitly [/]  [dim]{escape(self._short_path(s.root))}[/]")
-        summary.update(s.summary())
+        summary.update(s.summary() + self._fetch_note(s))
 
         warn = ""
         if s.conflicts:
@@ -880,6 +918,7 @@ class Gitly(App):
 
     AI_SETTLE = 4.0  # seconds the files must sit still before the AI reads them
     AI_GAP = 20.0  # at least this long between two background AI calls
+    FETCH_EVERY = 300.0  # seconds between background fetches
 
     def _with_next(self, menu: list, s: git.RepoState | None, settle: bool) -> list:
         """Work out the next step, show it, and put it at the top of the menu."""
@@ -1030,6 +1069,7 @@ class Gitly(App):
 
     def action_refresh(self) -> None:
         self.refresh_state(keep_highlight=True)
+        self.fetch_remote()  # r also checks GitHub right away
 
     @work(exclusive=True)
     async def handle(self, key: str) -> None:
@@ -1348,15 +1388,16 @@ class Gitly(App):
                 log.event("backup", id=b.id, wip=bool(b.wip))
 
         last: git.Result | None = None
-        for st in plan.steps:
-            if st.gitignore:
-                last = await asyncio.to_thread(git.append_gitignore, root, st.gitignore)
-            else:
-                last = await asyncio.to_thread(git.run, st.args, root)
-            log.event("step", args=st.args, gitignore=len(st.gitignore), code=last.code,
-                      seconds=round(last.seconds, 2), source=plan.source)
-            if not last.ok:
-                break
+        async with self._git_lock:  # waits for a background fetch to finish
+            for st in plan.steps:
+                if st.gitignore:
+                    last = await asyncio.to_thread(git.append_gitignore, root, st.gitignore)
+                else:
+                    last = await asyncio.to_thread(git.run, st.args, root)
+                log.event("step", args=st.args, gitignore=len(st.gitignore), code=last.code,
+                          seconds=round(last.seconds, 2), source=plan.source)
+                if not last.ok:
+                    break
 
         if last is not None and last.ok:
             tail = last.output.splitlines()[-1:] if last.output else []

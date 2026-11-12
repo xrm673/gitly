@@ -50,13 +50,13 @@ def display(args: list[str]) -> str:
     return "git " + shlex.join(args)
 
 
-def run(args: list[str], cwd: str | Path, timeout: float = 120) -> Result:
+def run(args: list[str], cwd: str | Path, timeout: float = 120, env: dict | None = None) -> Result:
     start = time.monotonic()
     try:
         p = subprocess.run(
             ["git", "--no-pager", *args],
             cwd=cwd,
-            env={**os.environ, **GIT_OVERRIDES},
+            env={**os.environ, **GIT_OVERRIDES, **(env or {})},
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -162,6 +162,16 @@ class RepoState:
 
 
 _XY = {"M": "modified", "T": "modified", "A": "new", "D": "deleted", "R": "renamed", "C": "copied"}
+
+
+def fetch(root: str | Path, timeout: float = 30) -> Result:
+    """Learn what's new on GitHub (updates origin/*). Never touches files or local branches.
+
+    Runs in the background, so it must never ask for anything: ssh's BatchMode
+    stops it from prompting for a passphrase or host key on the terminal.
+    """
+    env = {} if os.environ.get("GIT_SSH_COMMAND") else {"GIT_SSH_COMMAND": "ssh -o BatchMode=yes"}
+    return run(["fetch", "--quiet"], root, timeout=timeout, env=env)
 
 
 def find_root(cwd: str | Path) -> str | None:

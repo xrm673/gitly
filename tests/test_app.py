@@ -902,3 +902,29 @@ async def test_finish_rebase_continues_it(repo):
     s = git.state(repo)
     assert not s.rebasing and s.branch == "login"
     assert sh(repo, "log", "--format=%s").splitlines() == ["login second", "login form", "main edit", "first"]
+
+
+async def test_background_fetch_shows_new_commits(remote_pair, monkeypatch):
+    monkeypatch.setenv("GITLY_AUTO_FETCH", "1")
+    repo, other = remote_pair
+    (other / "o.txt").write_text("o"); sh(other, "add", "."); sh(other, "commit", "-qm", "o"); sh(other, "push", "-q")
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app.repo.behind == 1
+        summary = str(app.query_one("#summary").render())
+        assert "GitHub has 1 commit you don't" in summary and "checked GitHub just now" in summary
+        assert app.suggestion.kind == "pull"
+    assert sh(repo, "log", "--format=%s").splitlines() == ["first"]  # fetch only, nothing merged
+
+
+async def test_background_fetch_failure_is_quiet(repo, monkeypatch):
+    monkeypatch.setenv("GITLY_AUTO_FETCH", "1")
+    sh(repo, "remote", "add", "origin", str(repo.parent / "missing.git"))
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "couldn't reach GitHub just now" in str(app.query_one("#summary").render())
+        assert app.screen is app.screen_stack[0]  # no error dialog

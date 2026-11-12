@@ -97,6 +97,15 @@ every 20 seconds, and only while the gitly window has focus. Failures are
 silent, and after three in a row it stops for the session. Turn it off with
 `GITLY_AI_SUGGEST=0`; the AI features you start yourself keep working.
 
+**Checking GitHub.** When the project has a remote, gitly runs `git fetch`
+in the background when it starts and every 5 minutes after that (`r` checks
+right away). Fetching only updates what gitly knows about GitHub. It never
+changes your files or branches, so when someone else uploads new saves you
+get "Get latest" as the next step before your own upload is rejected. The
+header shows when it last checked, or "couldn't reach GitHub" when you're
+offline or not signed in (it never asks for a password). Turn it off with
+`GITLY_AUTO_FETCH=0`.
+
 **Branch map.** The home screen shows your branches as a simple picture,
 under your changed files: one row per branch, left = older, right = newer,
 starting from the save it grew out of. It shows where you are, your unsaved
