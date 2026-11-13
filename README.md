@@ -140,9 +140,36 @@ before anything runs. If you have unsaved changes, gitly checks whether they
 are in the way (the other branch, the incoming work, or the undo changes the
 same file). If they are, it offers to save them first, with the usual pre-save
 check and AI description. If a merge or undo stops on conflicts, the main
-screen offers to finish or cancel it. Before finishing, gitly checks the files
-for leftover `<<<<<<<` / `>>>>>>>` conflict markers and warns you if any are
-still there.
+screen offers to sort them out (below), finish, or cancel. Before finishing,
+gitly checks the files for leftover `<<<<<<<` / `>>>>>>>` conflict markers and
+warns you if any are still there.
+
+**Sorting out conflicts.** When a merge, pull, rebase or undo stops because
+both sides changed the same lines, **Sort out the conflicts** (also the
+suggested next step, and the first fix offered when the error appears) walks
+through every clashing spot, one at a time:
+
+- **Yours** and **Incoming** side by side, named after the real branches
+  (`main`, `login`, "GitHub's version", or in a rebase "your save “…”").
+  In a rebase git swaps its own ours/theirs; gitly swaps them back, so "yours"
+  is always your work.
+- With a key set, the AI explains in one sentence what each version does, then
+  recommends a pick and says why: keep yours, keep incoming, keep both (in
+  either order), or a **combined version** it writes when stacking both would
+  be wrong (the same setting twice, one function changed two ways). The
+  combined text is shown in full; when the AI isn't sure, it says so.
+- You choose. The recommendation is just the first option; **Skip** leaves that
+  spot's markers for you to edit. `b` goes back to the previous spot.
+
+Your picks become a normal plan (write each file, then `git add` the ones that
+are fully sorted out) shown before anything changes. gitly builds every file
+from the two versions themselves; the only AI-written text is a combined
+version you picked. If a file changed on disk after gitly read it (say your
+editor saved it), nothing is written. Files deleted on one side, binary files,
+and files whose markers don't parse get one whole-file choice instead. Spots
+you already fixed by hand simply don't appear. Until you finish, cancelling
+still restores everything. Without a key the screen works the same, minus the
+explanations and the recommendation.
 
 **Pre-save check.** Before **Save my work**, gitly looks at what the save would
 include and warns about:
@@ -159,8 +186,9 @@ The recommended fix, **Leave these out and save the rest**, is a normal plan you
 review first: new files are added to `.gitignore` so the warning doesn't come
 back, and anything `.gitignore` can't help with (a key inside `app.py`, a
 secrets file that was already committed) is left out of this one save with a
-pathspec. Files on disk are never deleted. Adding lines to `.gitignore` is the
-only plan step that isn't a git command; the AI can't produce it. The check is
+pathspec. Files on disk are never deleted. Adding lines to `.gitignore` is,
+along with writing a file whose conflicts you sorted out, one of only two plan
+steps that aren't git commands; the AI can't produce either. The check is
 plain pattern matching, so it's instant and works without an API key. See
 `gitly/precheck.py` and `gitly/secretscan.py`.
 
@@ -171,7 +199,7 @@ doesn't touch your files). Get it back with **Undo → Restore a gitly backup**.
 **Error rescue.** When git fails, gitly matches the error against common
 problems (push rejected, merge conflict, no upstream, divergent branches,
 unsaved changes in the way, no remote, auth failure, missing name/email,
-nothing to commit) and offers a one-click fix. Anything it doesn't recognize
+nothing to commit) and offers a one-click fix (for conflicts: sorting them out). Anything it doesn't recognize
 can be sent to the AI along with the error output.
 
 **AI save descriptions.** With a key set, **Save my work** reads your unsaved
@@ -198,6 +226,10 @@ per file and 12,000 in total. Files that look like secrets (`.env*`, `*.pem`,
 API keys found in other files are replaced with `[secret removed by gitly]`,
 and files you chose to leave out of the save aren't sent at all. Set `GITLY_AI_SEND_CODE=0` to send file names
 only, with no contents at all. See `working_diff()` in `gitly/git.py`.
+Sorting out conflicts sends, per file, both versions of each clashing spot (up
+to 6,000 characters a side; bigger spots and binary files aren't sent) with a
+few lines around it, and the descriptions of the saves that touched the file.
+With `GITLY_AI_SEND_CODE=0` it sends nothing and gives no advice.
 
 **AI guardrails.** The model returns structured JSON (a list of git argument
 lists), never shell text. Commands run without a shell. gitly refuses
@@ -215,8 +247,9 @@ writes one JSON event per line to `~/.gitly/logs/P07-<timestamp>.jsonl`: menu
 choices, plans shown, whether they were run or cancelled, each command's exit
 code and duration, failures and which rescue was offered, AI questions, latency
 and token counts, whether an AI-suggested save description was kept, edited
-or cancelled, and each next-step suggestion: shown, accepted or skipped, and
-whether it came from the rules or the AI. File contents are never logged and nothing is uploaded.
+or cancelled, each next-step suggestion: shown, accepted or skipped, and
+whether it came from the rules or the AI, and for each conflict spot the AI's
+recommendation and the pick you made. File contents are never logged and nothing is uploaded.
 Override the folder with `GITLY_LOG_DIR`.
 
 ## Code map
@@ -227,12 +260,13 @@ Override the folder with `GITLY_LOG_DIR`.
 | `gitly/git.py` | Runs the real `git` CLI; parses status; backups |
 | `gitly/actions.py` | The no-AI menu plans |
 | `gitly/rescue.py` | Error pattern → explanation + fixes |
+| `gitly/conflicts.py` | Sorting out conflicts: reads the spots, names the sides, turns picks into a plan |
 | `gitly/graph.py` | Branch map: lanes per branch, layout, rendering, the ghost of the next step |
 | `gitly/suggest.py` | The next step: rules, what the AI may change, checks on its answer |
 | `gitly/precheck.py` | Pre-save check: findings + the "leave these out" plan |
 | `gitly/secretscan.py` | Secret file names and API key patterns |
 | `gitly/safety.py` | Risk levels and blocked commands |
-| `gitly/ai.py` | AI features (Anthropic API): Ask → plan, save descriptions, change summaries, next step |
+| `gitly/ai.py` | AI features (Anthropic API): Ask → plan, save descriptions, change summaries, next step, conflict advice |
 | `gitly/studylog.py` | Opt-in JSONL event log |
 
 ## Tests

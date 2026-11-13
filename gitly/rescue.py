@@ -16,7 +16,7 @@ class Rescue:
     title: str
     explanation: str
     fixes: list[Plan] = field(default_factory=list)
-    needs_input: str | None = None  # e.g. "remote_url", "identity"
+    needs_input: str | None = None  # e.g. "remote_url", "identity", "conflicts"
 
 
 Rule = tuple[re.Pattern, Callable[[Result, RepoState], Rescue]]
@@ -50,10 +50,12 @@ def _conflict(r: Result, s: RepoState) -> Rescue:
     files = ", ".join(s.conflicts) or "some files"
     return Rescue(
         "Your changes and GitHub's changes overlap",
-        f"Both sides edited the same lines in: {files}. Git marked the spots with "
-        "<<<<<<< and >>>>>>>. Open those files (or ask your AI editor), keep the "
-        "right version, delete the markers, then come back and finish.",
+        f"Both sides edited the same lines in: {files}. gitly can show you each spot "
+        "with both versions side by side, explain what each one does, and suggest "
+        "which to keep. Or edit the files yourself (git marked the spots with "
+        "<<<<<<< and >>>>>>>), then come back and finish.",
         [actions.finish_merge(s), actions.abort_merge(s)],
+        needs_input="conflicts" if s.conflicts else None,
     )
 
 

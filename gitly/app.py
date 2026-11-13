@@ -19,7 +19,7 @@ from textual.message import Message
 from textual.widgets import Button, Footer, Input, LoadingIndicator, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
-from . import actions, ai, git, graph, precheck, rescue, safety, suggest
+from . import actions, ai, conflicts, git, graph, precheck, rescue, safety, suggest
 from .plan import Plan, Step
 from .studylog import StudyLog
 
@@ -223,6 +223,9 @@ class ProblemScreen(ModalScreen):
                 yield Static(f"[dim]$ {escape(git.display(self.failed.args))}\n"
                              f"{escape(self.failed.output[-1500:])}[/]", classes="raw")
             opts: list[Option] = []
+            if d and d.needs_input == "conflicts":
+                opts.append(Option("[b]Sort out the conflicts[/]  [dim](see both sides, with AI advice)[/]",
+                                   id="input"))
             if d:
                 opts += [Option(f"Fix: {escape(f.title)}", id=f"fix:{i}") for i, f in enumerate(d.fixes)]
                 if d.needs_input == "remote_url":
@@ -302,6 +305,143 @@ class ThinkingScreen(ModalScreen):
         with Vertical(classes="dialog"):
             yield Static(f"[b]Thinking…[/]  {escape(self.doing)}", classes="dialog-title")
             yield LoadingIndicator()
+
+
+def _pick_label(sp: conflicts.Spot, pick: str) -> str:
+    if pick == conflicts.MINE:
+        return "Delete the file, like yours does" if sp.mine is None else "Keep yours"
+    if pick == conflicts.INCOMING:
+        return "Delete the file, like incoming does" if sp.incoming is None else "Keep incoming"
+    return {
+        conflicts.MINE_FIRST: "Keep both, yours first",
+        conflicts.INCOMING_FIRST: "Keep both, incoming first",
+        conflicts.COMBINED: "Use the AI's combined version",
+        conflicts.SKIP: "Skip, I'll edit this spot myself",
+    }[pick]
+
+
+def _code(text: str | None, sp: conflicts.Spot, data: bytes | None) -> str:
+    if text is None:
+        return "[dim](this side deletes the file)[/]"
+    if sp.binary:
+        return f"[dim](binary file, {len(data or b'') / 1024:.0f} KB)[/]"
+    if not text.strip():
+        return "[dim](nothing: this side removes these lines)[/]"
+    return escape(text.rstrip("\n"))
+
+
+class ResolveScreen(ModalScreen):
+    """Walk through every clashing spot: both versions, what the AI makes of them, a pick.
+
+    Returns {(path, spot n): pick}, or None when cancelled.
+    """
+
+    BINDINGS = [Binding("escape", "dismiss(None)", "Cancel"),
+                Binding("b", "back", "Previous spot"),
+                Binding("pageup", "scroll(-1)", "Scroll up", show=False),
+                Binding("pagedown", "scroll(1)", "Scroll down", show=False)]
+
+    def __init__(self, files: list[conflicts.ConflictFile], sd: conflicts.Sides,
+                 hist: dict[str, tuple[list[str], list[str]]], ai_note: str = ""):
+        super().__init__()
+        self.sd, self.hist, self.ai_note = sd, hist, ai_note
+        self.spots = [sp for f in files for sp in f.spots]
+        self.choices: dict[tuple[str, int], str] = {}
+        self.i = 0
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog resolve"):
+            yield Static(id="where", classes="dialog-title")
+            yield Static(id="advice")  # up top: the recommendation and why, always in view
+            with VerticalScroll(classes="plan-body"):
+                with Horizontal(id="sides"):
+                    with Vertical(id="mine", classes="side"):
+                        yield ScrollableContainer(Static(id="mine-code"), classes="code")
+                        yield Static(id="mine-does", classes="does")
+                    with Vertical(id="incoming", classes="side"):
+                        yield ScrollableContainer(Static(id="incoming-code"), classes="code")
+                        yield Static(id="incoming-does", classes="does")
+                with ScrollableContainer(id="combined", classes="code"):
+                    yield Static(id="combined-code")
+            yield OptionList(id="picks")
+            yield Static("[dim]↑↓ move · Enter choose · b previous spot · PgUp/PgDn scroll · Esc cancel[/]")
+
+    def on_mount(self) -> None:
+        self.query_one("#mine").border_title = f"Yours · {escape(self.sd.mine)}"
+        self.query_one("#incoming").border_title = f"Incoming · {escape(self.sd.incoming)}"
+        self.query_one("#combined").border_title = f"[{AI_COLOR}]✦[/] The AI's combined version"
+        self.show()
+        self.query_one("#picks", OptionList).focus()
+
+    def show(self) -> None:
+        sp = self.spots[self.i]
+        a = sp.advice
+        at = f"line {sp.line} · " if sp.line else "whole file · "
+        self.query_one("#where", Static).update(
+            f"[b]{escape(sp.path)}[/]  [dim]{at}spot {self.i + 1} of {len(self.spots)}[/]")
+        self.query_one("#mine-code", Static).update(_code(sp.mine, sp, sp.mine_bytes))
+        self.query_one("#incoming-code", Static).update(_code(sp.incoming, sp, sp.incoming_bytes))
+        mine_h, inc_h = self.hist.get(sp.path, ([], []))
+        for side, does, h in (("mine", a.mine_does if a else "", mine_h),
+                              ("incoming", a.incoming_does if a else "", inc_h)):
+            w = self.query_one(f"#{side}-does", Static)
+            if does:
+                w.update(f"✦ {escape(does)}")
+            elif h:
+                w.update(f"[dim]Last save here: “{escape(h[0])}”[/]")
+            else:
+                w.update("")
+        combined = self.query_one("#combined")
+        has_combined = bool(a and a.pick == conflicts.COMBINED)
+        combined.set_class(has_combined, "show")
+        if has_combined:
+            self.query_one("#combined-code", Static).update(escape(a.combined.rstrip("\n")))
+
+        lines = []
+        if sp.unreadable:
+            lines.append("[$warning]gitly couldn't read the conflict markers in this file, so it can only "
+                         "keep one whole version. To mix the two, skip it and edit the file yourself.[/]")
+        if a and a.pick:
+            lines.append(f"[b {AI_COLOR}]✦ AI suggests: {escape(_pick_label(sp, a.pick))}[/]"
+                         + (f"\n  {escape(a.reason)}" if a.reason else ""))
+            if a.unsure:
+                lines.append("[$warning]  The AI isn't sure about this one. Look at both sides closely.[/]")
+        elif a and a.reason:
+            lines.append(f"[{AI_COLOR}]✦[/] {escape(a.reason)}")
+        elif self.ai_note:
+            lines.append(f"[dim]{escape(self.ai_note)}[/]")
+        advice = self.query_one("#advice", Static)
+        advice.update("\n".join(lines))
+        advice.set_class(not lines, "empty")
+
+        ol = self.query_one("#picks", OptionList)
+        opts = sp.options()
+        rec = a.pick if a else None
+        ol.set_options([Option(_pick_label(sp, p) + (f"  [{AI_COLOR}]✦ recommended[/]" if p == rec else ""),
+                               id=p) for p in opts])
+        prev = self.choices.get((sp.path, sp.n))
+        ol.highlighted = opts.index(prev) if prev in opts else 0
+
+    @on(OptionList.OptionSelected, "#picks")
+    def chosen(self, event: OptionList.OptionSelected) -> None:
+        sp = self.spots[self.i]
+        self.choices[(sp.path, sp.n)] = event.option.id
+        if self.i + 1 >= len(self.spots):
+            self.dismiss(self.choices)
+            return
+        self.i += 1
+        self.show()
+        self.query_one(".plan-body", VerticalScroll).scroll_home(animate=False)
+
+    def action_scroll(self, direction: int) -> None:
+        body = self.query_one(".plan-body", VerticalScroll)
+        body.scroll_relative(y=direction * max(body.size.height - 2, 1), animate=False)
+
+    def action_back(self) -> None:
+        if self.i > 0:
+            self.i -= 1
+            self.show()
+            self.query_one(".plan-body", VerticalScroll).scroll_home(animate=False)
 
 
 class Menu(OptionList):
@@ -928,6 +1068,20 @@ class Gitly(App):
     .buttons { height: auto; margin-top: 1; }
     .buttons Button { margin-right: 2; }
     LoadingIndicator { height: 3; }
+    /* Sorting out conflicts: the AI's take on top, both versions side by side, then the picks */
+    .dialog.resolve { width: 116; height: 90%; }
+    .resolve .plan-body { height: 1fr; max-height: 100%; }
+    .resolve #sides { height: auto; }
+    .resolve .side { width: 1fr; height: auto; border: round $panel-lighten-2; padding: 0 1; }
+    .resolve .code { height: auto; max-height: 12; }
+    .resolve .code Static { width: auto; text-wrap: nowrap; }
+    .resolve .does { color: #b69cff; height: auto; margin-top: 1; }
+    .resolve #combined { height: auto; border: round #b69cff; padding: 0 1; display: none;
+                         border-title-color: #b69cff; }
+    .resolve #combined.show { display: block; }
+    .resolve #advice { height: auto; margin-bottom: 1; }
+    .resolve #advice.empty { display: none; }
+    .resolve #picks { max-height: 8; }
     """
     BINDINGS = [
         # Like accepting autocomplete: Tab takes the suggested next step from anywhere on the
@@ -962,6 +1116,7 @@ class Gitly(App):
         self._git_lock = asyncio.Lock()  # a fetch and a plan's steps never run at once
         self._fetched_at: float | None = None  # last successful fetch (monotonic)
         self._fetch_failed = False
+        self._resolve_asked_key = False  # offer to turn on the AI for conflicts once per run
 
     # ---- layout
 
@@ -1069,8 +1224,8 @@ class Gitly(App):
 
         warn = ""
         if s.conflicts:
-            warn = (f"⚠ {len(s.conflicts)} file(s) have conflicts. Edit them to keep the right "
-                    "version (remove the <<<<<<< >>>>>>> markers), then choose “I fixed the conflicts”.")
+            warn = (f"⚠ {len(s.conflicts)} file(s) have conflicts. Choose “Sort out the conflicts” to see "
+                    "both versions side by side, or edit the files yourself and choose “I fixed the conflicts”.")
         elif s.merging or s.rebasing or s.reverting:
             warn = "⚠ A merge/rebase is in progress. Finish it or cancel it below."
         elif s.detached:
@@ -1094,7 +1249,11 @@ class Gitly(App):
         files.update("\n".join(lines) if lines else "[dim]No unsaved changes.[/]")
 
         menu: list = []
-        if s.conflicts or s.merging or s.rebasing or s.reverting:
+        if s.conflicts:
+            menu += [("resolve", "[b]Sort out the conflicts[/]"),
+                     ("finish_merge", "I fixed the conflicts, finish"),
+                     ("abort_merge", "Cancel combining"), None]
+        elif s.merging or s.rebasing or s.reverting:
             menu += [("finish_merge", "[b]I fixed the conflicts, finish[/]"),
                      ("abort_merge", "Cancel combining"), None]
         if s.detached and not s.rebasing:  # a rebase always runs on a detached HEAD
@@ -1345,6 +1504,8 @@ class Gitly(App):
             await self.push_screen_wait(TextScreen("History (newest first)", body))
         elif key == "connect":
             return await self.connect_flow()
+        elif key == "resolve":
+            return await self.resolve_flow(s)
         elif key == "finish_merge":
             return actions.finish_merge(s)
         elif key == "abort_merge":
@@ -1602,6 +1763,84 @@ class Gitly(App):
         if plan is not None:
             await self.execute(plan)
 
+    # ---- sorting out conflicts
+
+    RESOLVE_AI_AT_ONCE = 4  # files asked about in parallel
+
+    async def resolve_flow(self, s: git.RepoState) -> Plan | None:
+        """Show each clashing spot with the AI's advice, then a plan for the user's picks."""
+        files, sd = await asyncio.to_thread(conflicts.load, s)
+        if not files:
+            self.notify("No conflicts left to sort out.")
+            return None
+        hist = {}
+        for f in files:
+            if f.spots:
+                hist[f.path] = await asyncio.to_thread(conflicts.history, s.root, sd, f.path)
+        spots = [sp for f in files for sp in f.spots]
+        ai_note = await self._advise(files, sd, hist) if spots else ""
+        self.log_.event("resolve_shown", files=len(files), spots=len(spots), op=sd.op,
+                        advised=sum(1 for sp in spots if sp.advice and sp.advice.pick))
+        choices: dict[tuple[str, int], str] = {}
+        if spots:
+            choices = await self.push_screen_wait(ResolveScreen(files, sd, hist, ai_note))
+            if choices is None:
+                self.log_.event("resolve_cancelled")
+                return None
+        for sp in spots:
+            pick = choices.get((sp.path, sp.n), conflicts.SKIP)
+            rec = sp.advice.pick if sp.advice else None
+            self.log_.event("resolve_pick", pick=pick, recommended=rec, took=rec is not None and pick == rec,
+                            unsure=bool(sp.advice and sp.advice.unsure), whole_file=sp.whole_file)
+        name = {"rebase": "rebase", "revert": "undo"}.get(sd.op, "combining")
+        return conflicts.plan(files, sd, choices, op_name=name)
+
+    async def _advise(self, files: list[conflicts.ConflictFile], sd: conflicts.Sides,
+                      hist: dict[str, tuple[list[str], list[str]]]) -> str:
+        """Ask the AI about each file's spots (fills in spot.advice).
+
+        Returns a note for the screen when some or all advice is missing.
+        """
+        targets = [f for f in files if any(ai.advisable(sp) for sp in f.spots)]
+        if not targets:
+            return ""
+        if not ai.shares_code():
+            return "No AI advice: it needs to send these lines, and GITLY_AI_SEND_CODE=0 is set."
+        if not ai.available():
+            if self._resolve_asked_key or not await self.ai_setup():
+                self._resolve_asked_key = True
+                return "No AI advice: the AI is off. Press ? on the home screen to turn it on."
+        limit = asyncio.Semaphore(self.RESOLVE_AI_AT_ONCE)
+
+        async def one(f: conflicts.ConflictFile):
+            async with limit:
+                return await asyncio.to_thread(ai.advise_conflict, f, sd, hist.get(f.path, ([], [])))
+
+        self.push_screen(ThinkingScreen("reading both sides of each conflict"))
+        try:
+            results = await asyncio.gather(*(one(f) for f in targets), return_exceptions=True)
+        finally:
+            self.pop_screen()
+        errors: list[BaseException] = []
+        for f, r in zip(targets, results):
+            if isinstance(r, BaseException):
+                errors.append(r)
+                self.log_.event("ai_error", feature="ai_conflict", message=str(r))
+                continue
+            advice, tel = r
+            for sp in f.spots:
+                sp.advice = advice.get(sp.n)
+            self.log_.event("ai_conflict", **tel)
+        if not errors:
+            return ""
+        if len(errors) == len(targets) and any(isinstance(e, ai.AIKeyRejected) for e in errors):
+            if await self.ai_setup(rejected=True):
+                return await self._advise(files, sd, hist)
+        e = errors[0]
+        why = str(e) if isinstance(e, ai.AIUnavailable) else "something went wrong asking the AI."
+        some = "some of these spots" if len(errors) < len(targets) else "these spots"
+        return f"No AI advice for {some}: {why}"
+
     # ---- running plans
 
     async def execute(self, plan: Plan) -> None:
@@ -1647,6 +1886,13 @@ class Gitly(App):
             return
 
         root = self.repo.root if self.repo else self.cwd
+        changed = await asyncio.to_thread(conflicts.changed_since_read, root, plan)
+        if changed:
+            log.event("resolve_stale", files=len(changed))
+            self.notify(f"{', '.join(changed)} changed after gitly read it, so nothing was written. "
+                        "Choose “Sort out the conflicts” again to see the latest.",
+                        severity="warning", timeout=10)
+            return
         if plan.risk == safety.DANGER:
             b = await asyncio.to_thread(git.make_backup, root, plan.title)
             if b:
@@ -1655,11 +1901,14 @@ class Gitly(App):
         last: git.Result | None = None
         async with self._git_lock:  # waits for a background fetch to finish
             for st in plan.steps:
-                if st.gitignore:
+                if st.write is not None:
+                    last = await asyncio.to_thread(conflicts.write, root, st)
+                elif st.gitignore:
                     last = await asyncio.to_thread(git.append_gitignore, root, st.gitignore)
                 else:
                     last = await asyncio.to_thread(git.run, st.args, root)
-                log.event("step", args=st.args, gitignore=len(st.gitignore), code=last.code,
+                log.event("step", args=st.args if st.write is None else ["(write)"],
+                          gitignore=len(st.gitignore), code=last.code,
                           seconds=round(last.seconds, 2), source=plan.source)
                 if not last.ok:
                     break
@@ -1693,6 +1942,9 @@ class Gitly(App):
             if diag.needs_input == "remote_url":
                 p = await self.connect_flow()
                 if p:
+                    await self._execute(p)
+            elif diag.needs_input == "conflicts":
+                if s and (p := await self.resolve_flow(s)):
                     await self._execute(p)
             elif diag.needs_input == "identity":
                 name = await self.push_screen_wait(AskTextScreen("Your name", placeholder="Ada Lovelace"))
