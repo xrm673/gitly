@@ -52,8 +52,10 @@ def _conflict(r: Result, s: RepoState) -> Rescue:
         "Your changes and GitHub's changes overlap",
         f"Both sides edited the same lines in: {files}. gitly can show you each spot "
         "with both versions side by side, explain what each one does, and suggest "
-        "which to keep. Or edit the files yourself (git marked the spots with "
-        "<<<<<<< and >>>>>>>), then come back and finish.",
+        "which to keep. Or open the files in your editor: VS Code and Cursor show "
+        "each clash with “Accept Current” / “Accept Incoming” buttons. Pick one per "
+        "spot, save, then come back and finish. Nothing is lost: cancelling puts "
+        "everything back the way it was.",
         [actions.finish_merge(s), actions.abort_merge(s)],
         needs_input="conflicts" if s.conflicts else None,
     )
