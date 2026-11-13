@@ -50,9 +50,10 @@ def _conflict(r: Result, s: RepoState) -> Rescue:
     files = ", ".join(s.conflicts) or "some files"
     return Rescue(
         "Your changes and GitHub's changes overlap",
-        f"Both sides edited the same lines in: {files}. Git marked the spots with "
-        "<<<<<<< and >>>>>>>. Open those files (or ask your AI editor), keep the "
-        "right version, delete the markers, then come back and finish.",
+        f"Both sides edited the same lines in: {files}. Open them in your editor: "
+        "VS Code and Cursor show each clash with “Accept Current” / “Accept Incoming” "
+        "buttons. Pick one per spot, save, then come back and finish. Nothing is "
+        "lost: cancelling puts everything back the way it was.",
         [actions.finish_merge(s), actions.abort_merge(s)],
     )
 
