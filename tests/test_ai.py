@@ -168,3 +168,63 @@ def test_next_step_schema_is_accepted_by_sdk():
 def test_default_model_is_sonnet():
     import os
     assert ai.MODEL == os.environ.get("GITLY_MODEL", "claude-sonnet-5-5")
+
+
+def _conflict_file():
+    from gitly import conflicts
+    f = conflicts.ConflictFile("f.py", "UU", [
+        conflicts.Spot("f.py", 1, "x = 3\n", "x = 2\n", line=4, before="def go():\n"),
+        conflicts.Spot("f.py", 2, "a()\n", "b()\n", line=9),
+        conflicts.Spot("f.py", 3, "big\n" * 2000, "small\n", line=20),  # too big to send
+    ])
+    sd = conflicts.Sides("main", "login", "merge")
+    return f, sd
+
+
+def test_conflict_advice_request_and_checks(monkeypatch):
+    f, sd = _conflict_file()
+    out = ai.ConflictAdvice(spots=[
+        ai.SpotAdvice(spot=1, mine_does="Sets 3.", incoming_does="Sets 2.", pick=" Incoming ",
+                      combined="", reason="Newer.", unsure=True),
+        ai.SpotAdvice(spot=2, mine_does="Calls a.", incoming_does="Calls b.", pick="combined",
+                      combined="<<<<<<< HEAD\na()\n", reason="Both.", unsure=False),
+        ai.SpotAdvice(spot=3, mine_does="?", incoming_does="?", pick="mine", combined="", reason="", unsure=False),
+    ])
+    msgs = fake_client(monkeypatch, out)
+    advice, tel = ai.advise_conflict(f, sd, (["main change"], ["login change"]))
+    kw = msgs.calls[0]
+    content = kw["messages"][0]["content"]
+    assert kw["system"] == ai.CONFLICT_SYSTEM and kw["output_format"] is ai.ConflictAdvice
+    assert kw["output_config"] == {"effort": "medium"}
+    assert '<spot n="1" line="4">' in content and "def go():" in content and "- login change" in content
+    assert 'n="3"' not in content  # too big: not sent, and its advice ignored
+    assert set(advice) == {1, 2}
+    assert advice[1].pick == "incoming" and advice[1].unsure and advice[1].mine_does == "Sets 3."
+    assert advice[2].pick is None and advice[2].incoming_does == "Calls b."  # markers left in: no pick
+    assert tel["spots"] == 2 and tel["picks"] == ["incoming", None]
+
+
+def test_conflict_advice_whole_file_allows_only_one_side(monkeypatch):
+    from gitly import conflicts
+    f = conflicts.ConflictFile("d.txt", "DU", [conflicts.Spot("d.txt", 1, None, "edited\n", whole_file=True)])
+    out = ai.ConflictAdvice(spots=[ai.SpotAdvice(spot=1, mine_does="Deletes it.", incoming_does="Edits it.",
+                                                 pick="both_mine_first", combined="", reason="", unsure=False)])
+    msgs = fake_client(monkeypatch, out)
+    advice, _ = ai.advise_conflict(f, conflicts.Sides("main", "login", "merge"), ([], []))
+    assert advice[1].pick is None
+    content = msgs.calls[0]["messages"][0]["content"]
+    assert 'whole_file="true"' in content and '<yours deleted="true"/>' in content
+
+
+def test_conflict_advice_respects_opt_out(monkeypatch):
+    monkeypatch.setenv("GITLY_AI_SEND_CODE", "0")
+    msgs = fake_client(monkeypatch, None)
+    f, sd = _conflict_file()
+    with pytest.raises(ai.AIUnavailable):
+        ai.advise_conflict(f, sd, ([], []))
+    assert msgs.calls == []
+
+
+def test_conflict_schema_is_accepted_by_sdk():
+    from anthropic.lib._parse._transform import transform_schema
+    assert transform_schema(ai.ConflictAdvice.model_json_schema())["additionalProperties"] is False

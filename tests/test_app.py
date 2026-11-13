@@ -1097,3 +1097,112 @@ async def test_map_cursor_follows_a_new_save(repo):
         (repo / "d.txt").write_text("d"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "fourth")
         app.refresh_state(keep_highlight=True)
         assert bm.selected()[1] == picked
+
+
+def _fake_advice(monkeypatch, advice):
+    from gitly import ai
+    calls = []
+    monkeypatch.setattr(ai, "available", lambda: True)
+
+    def advise(f, sd, hist):
+        calls.append((f.path, sd.incoming, hist))
+        return advice, {"spots": len(advice)}
+    monkeypatch.setattr(ai, "advise_conflict", advise)
+    return calls
+
+
+async def test_resolve_conflicts_with_ai_advice(repo, monkeypatch):
+    from gitly import conflicts
+    from gitly.app import ResolveScreen
+
+    _conflicted_merge(repo)
+    calls = _fake_advice(monkeypatch, {1: conflicts.Advice(
+        "Says main.", "Says login.", conflicts.COMBINED, "main and login version\n", "Both matter.", False)})
+    app = Gitly(str(repo))
+    async with app.run_test(size=(140, 45)) as pilot:
+        assert app.suggestion.menu == "resolve"
+        await pilot.press("tab")
+        screen = await wait_for(pilot, ResolveScreen)
+        assert calls == [("a.txt", "login", (["main edit"], ["login form"]))]
+        assert "AI suggests" in str(screen.query_one("#advice").render())
+        assert "Says login." in str(screen.query_one("#incoming-does").render())
+        assert screen.query_one("#combined").has_class("show")
+        assert screen.query_one("#picks").highlighted_option.id == conflicts.COMBINED
+        await pilot.press("enter")
+        plan_screen = await wait_for(pilot, PlanScreen)
+        assert [st.display for st in plan_screen.plan.steps] == ["write a.txt", "git add -- a.txt"]
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app.suggestion.menu == "finish_merge"
+    assert (repo / "a.txt").read_text() == "main and login version\n"
+    assert git.state(repo).merging and not git.state(repo).conflicts
+
+
+async def test_resolve_without_ai_still_works(repo, monkeypatch):
+    from gitly import conflicts
+    from gitly.app import ResolveScreen
+
+    _conflicted_merge(repo)
+    (repo / "b.txt").write_text("b\n")  # a second clashing file
+    sh(repo, "merge", "--abort")
+    sh(repo, "switch", "-q", "login"); (repo / "b.txt").write_text("login b\n")
+    sh(repo, "add", "."); sh(repo, "commit", "-qm", "login b"); sh(repo, "switch", "-q", "main")
+    (repo / "b.txt").write_text("main b\n"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "main b")
+    assert not git.run(["merge", "login"], repo).ok
+    app = Gitly(str(repo))
+    async with app.run_test(size=(140, 45)) as pilot:
+        app._resolve_asked_key = True  # don't stop to ask for an API key
+        await choose(pilot, "resolve")
+        screen = await wait_for(pilot, ResolveScreen)
+        assert "the AI is off" in str(screen.query_one("#advice").render())
+        assert "Last save here" in str(screen.query_one("#mine-does").render())
+        await pilot.press("down", "enter")  # a.txt: keep incoming
+        assert "b.txt" in str(screen.query_one("#where").render())
+        await pilot.press("b")  # back to a.txt: the pick is remembered
+        assert screen.query_one("#picks").highlighted_option.id == conflicts.INCOMING
+        await pilot.press("enter", "enter")  # b.txt: keep yours
+        plan_screen = await wait_for(pilot, PlanScreen)
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+    assert (repo / "a.txt").read_text() == "login version\n"
+    assert (repo / "b.txt").read_text() == "main b\n"
+
+
+async def test_resolve_refuses_to_overwrite_newer_edits(repo, monkeypatch):
+    from gitly.app import ResolveScreen
+
+    _conflicted_merge(repo)
+    app = Gitly(str(repo))
+    async with app.run_test(size=(140, 45)) as pilot:
+        app._resolve_asked_key = True
+        await choose(pilot, "resolve")
+        await wait_for(pilot, ResolveScreen)
+        await pilot.press("enter")
+        await wait_for(pilot, PlanScreen)
+        (repo / "a.txt").write_text("edited in the editor meanwhile\n")
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+    assert (repo / "a.txt").read_text() == "edited in the editor meanwhile\n"
+
+
+async def test_pull_conflict_offers_sorting_out(remote_pair, monkeypatch):
+    from gitly import conflicts
+    from gitly.app import ResolveScreen
+
+    repo, other = remote_pair
+    (other / "a.txt").write_text("theirs\n"); sh(other, "commit", "-qam", "t"); sh(other, "push", "-q")
+    (repo / "a.txt").write_text("mine\n"); sh(repo, "commit", "-qam", "m")
+    sh(repo, "fetch", "-q")
+    _fake_advice(monkeypatch, {1: conflicts.Advice("Mine.", "Theirs.", conflicts.MINE, "", "Yours is newer.", True)})
+    app = Gitly(str(repo))
+    async with app.run_test(size=(140, 45)) as pilot:
+        await choose(pilot, "pull")
+        await wait_for(pilot, PlanScreen)
+        await pilot.press("enter")
+        problem = await wait_for(pilot, ProblemScreen)
+        assert problem.query_one("OptionList").get_option_at_index(0).id == "input"
+        await pilot.press("enter")
+        screen = await wait_for(pilot, ResolveScreen)
+        assert "GitHub's version" in screen.query_one("#incoming").border_title
+        assert "isn't sure" in str(screen.query_one("#advice").render())

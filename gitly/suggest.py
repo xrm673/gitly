@@ -74,9 +74,9 @@ def rules(s: RepoState | None, g: Graph | None) -> Suggestion:
                           reason="gitly can only save your work once this folder is a git project.")
     if s.conflicts:
         n = len(s.conflicts)
-        return Suggestion("none", f"Fix the conflicts in {_files(n)}",
-                          f"Open {s.conflicts[0]}{' and the others' if n > 1 else ''}, keep the version you "
-                          "want, and remove the <<<<<<< >>>>>>> markers. Then finish from the menu.")
+        return Suggestion("menu", f"Sort out the conflicts in {_files(n)}", menu="resolve",
+                          reason="See both versions of each spot side by side, with the AI's "
+                                 "take on which to keep. You make the call.")
     if s.merging or s.rebasing or s.reverting:
         return Suggestion("menu", "Finish what's in progress", menu="finish_merge",
                           reason="The conflicts are sorted out. One more save completes it.")

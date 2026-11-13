@@ -81,7 +81,7 @@ def test_local_only_project_is_pointed_at_github(repo):
     assert (sg.kind, sg.menu) == ("menu", "connect")
 
 
-def test_conflicts_have_no_one_key_fix(repo):
+def test_conflicts_lead_to_sorting_them_out(repo):
     sh(repo, "switch", "-qc", "other")
     (repo / "a.txt").write_text("theirs\n"); sh(repo, "commit", "-qam", "theirs")
     sh(repo, "switch", "-q", "main")
@@ -90,7 +90,7 @@ def test_conflicts_have_no_one_key_fix(repo):
     subprocess.run(["git", "merge", "other"], cwd=repo, capture_output=True)
     s, g = look(repo)
     sg = suggest.rules(s, g)
-    assert not sg.acceptable and "a.txt" in sg.reason and suggest.allowed(s, sg) == []
+    assert sg.menu == "resolve" and "1 file" in sg.title and suggest.allowed(s, sg) == []
     (repo / "a.txt").write_text("both\n"); sh(repo, "add", ".")
     sg = suggest.rules(*look(repo))
     assert sg.menu == "finish_merge"

@@ -88,6 +88,9 @@ class RepoState:
     changes: list[FileChange] = field(default_factory=list)
     untracked: list[str] = field(default_factory=list)
     conflicts: list[str] = field(default_factory=list)
+    # How each conflicted file clashes, as git's two letters: UU both edited, AA both
+    # added, DU/UD deleted on one side, AU/UA added on one side, DD deleted on both.
+    conflict_kinds: dict[str, str] = field(default_factory=dict)
     merging: bool = False
     rebasing: bool = False
     reverting: bool = False
@@ -182,7 +185,7 @@ def find_root(cwd: str | Path) -> str | None:
 def parse_status(text: str) -> dict:
     """Parse `git status --porcelain=v2 --branch -z`."""
     out: dict = {"branch": None, "oid": None, "upstream": None, "ahead": 0, "behind": 0,
-                 "changes": [], "untracked": [], "conflicts": []}
+                 "changes": [], "untracked": [], "conflicts": [], "conflict_kinds": {}}
     entries = text.split("\0")
     i = 0
     while i < len(entries):
@@ -212,7 +215,9 @@ def parse_status(text: str) -> dict:
             if y != ".":
                 out["changes"].append(FileChange(path, False, _XY.get(y, "changed")))
         elif e[0] == "u":
-            out["conflicts"].append(e.split(" ", 10)[-1])
+            fields = e.split(" ", 10)
+            out["conflicts"].append(fields[-1])
+            out["conflict_kinds"][fields[-1]] = fields[1]
         elif e[0] == "?":
             out["untracked"].append(e[2:])
     return out
@@ -236,6 +241,7 @@ def state(cwd: str | Path) -> RepoState | None:
         changes=s["changes"],
         untracked=s["untracked"],
         conflicts=s["conflicts"],
+        conflict_kinds=s["conflict_kinds"],
         merging=(gitdir / "MERGE_HEAD").exists(),
         rebasing=(gitdir / "rebase-merge").exists() or (gitdir / "rebase-apply").exists(),
         reverting=(gitdir / "REVERT_HEAD").exists(),
@@ -350,6 +356,17 @@ def tidy_branch_name(text: str) -> str:
 
 def valid_branch_name(root: str | Path, name: str) -> bool:
     return run(["check-ref-format", "--branch", name], root).ok
+
+
+def blob(root: str | Path, spec: str) -> bytes | None:
+    """Raw bytes of an object, e.g. ":2:a.txt" (a conflicted file's version on one side)."""
+    try:
+        p = subprocess.run(["git", "--no-pager", "cat-file", "blob", spec], cwd=root,
+                           env={**os.environ, **GIT_OVERRIDES}, capture_output=True,
+                           timeout=30, stdin=subprocess.DEVNULL)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    return p.stdout if p.returncode == 0 else None
 
 
 def recent_log(cwd: str | Path, n: int = 20) -> list[str]:
