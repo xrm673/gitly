@@ -816,6 +816,34 @@ async def test_ai_splits_unrelated_changes(repo, monkeypatch):
     assert sh(repo, "log", "--format=%s").splitlines() == ["Add payments", "Fix a", "first"]
 
 
+async def test_ai_branch_for_unrelated_work_starts_from_main(repo, monkeypatch):
+    from gitly import suggest
+    from gitly.app import BranchMap
+
+    ai_on(monkeypatch, lambda s, base: suggest.Suggestion(
+        "new_branch", "Start a branch for this: add-hikes (from main)", "Not about dark mode.",
+        source="ai", branch="add-hikes", target="main"))
+    sh(repo, "switch", "-qc", "dark-mode")
+    (repo / "theme.css").write_text("dark"); sh(repo, "add", "."); sh(repo, "commit", "-qm", "Add dark mode")
+    (repo / "hikes.js").write_text("hikes")
+    main = sh(repo, "rev-parse", "main").strip()
+    app = Gitly(str(repo))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "add-hikes" in text_of(app, "#next-title")
+        rows = str(app.query_one(BranchMap).query_one("#map").render()).splitlines()
+        assert "add-hikes" in rows[1] and "dark-mode" in rows[2]  # drawn under main
+        await pilot.press("enter")
+        plan = (await wait_for(pilot, PlanScreen)).plan
+        assert plan.steps[-1].args == ["switch", "--create", "add-hikes", main[:12]]
+        assert "'main'" in plan.steps[-1].why
+        await _run_plan_and_return(pilot)
+    assert sh(repo, "branch", "--show-current").strip() == "add-hikes"
+    assert sh(repo, "rev-parse", "HEAD").strip() == main  # dark mode's save didn't come along
+    assert (repo / "hikes.js").read_text() == "hikes" and not (repo / "theme.css").exists()
+
+
 async def test_ai_split_gives_way_to_the_pre_save_check(repo, monkeypatch):
     from gitly import suggest
     from gitly.app import PrecheckScreen

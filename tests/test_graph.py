@@ -264,6 +264,20 @@ def test_ghost_branch_gets_its_own_row(repo):
     assert lines[1].index("╰") == lines[0].index("◉")  # it grows out of where you are
 
 
+def test_ghost_branch_can_grow_out_of_main(repo):
+    commit(repo, "second")
+    sh(repo, "switch", "-qc", "dark-mode")
+    commit(repo, "theme")
+    (repo / "x.txt").write_text("x")
+    s = git.state(repo)
+    g = graph.build(s)
+    ghost = graph.Ghost(branch="add-hikes", saves=1, fork="main")
+    lines = Text.from_markup(graph.render(g, s, ghost=ghost)).plain.splitlines()
+    assert [l.split()[0] for l in lines] == ["main", "add-hikes", "▶"]  # under main, not under you
+    assert lines[1].index("╰") == lines[0].rindex("●")  # from main's latest save
+    assert graph.line_rows(g, ghost) == [0, None, 1]
+
+
 def test_two_previewed_saves_are_distinct(repo):
     s = git.state(repo)
     twice = graph.after_save(graph.after_save(graph.build(s), "one"), "two")

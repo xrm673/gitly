@@ -86,7 +86,9 @@ background and refines it, marked with `✦`:
 
 - writes the save description ahead of time, so it's already filled in
 - suggests splitting unrelated changes into two or three separate saves
-- suggests starting a branch when the changes don't belong where you are
+- suggests starting a branch when the changes don't belong where you are (on
+  another branch, the new one starts from main, so that branch's saves don't
+  come along)
 - says whether a saved branch looks finished or still in progress
 
 The AI doesn't write git commands for this. It picks one action from a short

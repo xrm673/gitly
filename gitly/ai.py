@@ -132,7 +132,8 @@ groups so each save works by itself. Don't split work that belongs together \
 (code and its tests, a feature and its docs). When unsure, use save.
 - new_branch: the user is on the main branch and the changes are the start of \
 something bigger or experimental that shouldn't land there half-done; or they're \
-on a branch whose name is clearly about something else. Set `branch` to a name: \
+on a branch whose name is clearly about something else (then gitly starts the new \
+branch from the main branch, so this branch's saves don't come along). Set `branch` to a name: \
 lowercase words joined by dashes, at most 40 characters, following the prefixes \
 other branches use (if any). Small fixes and finished changes on the main branch \
 are fine as a plain save: most solo projects never need this.

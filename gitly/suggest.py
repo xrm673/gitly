@@ -39,7 +39,7 @@ class Suggestion:
     message: str = ""  # save: a description written ahead of time
     groups: list[SaveGroup] = field(default_factory=list)  # split_save
     branch: str = ""  # new_branch: its name; cleanup: the branch to delete; merge: the source
-    target: str = ""  # merge: the branch receiving the work
+    target: str = ""  # merge: the branch receiving the work; new_branch: where it starts (empty: here)
 
     @property
     def acceptable(self) -> bool:
@@ -130,7 +130,7 @@ def ghost(sg: Suggestion, s: RepoState | None) -> Ghost | None:
     if sg.kind == "split_save":
         return Ghost(saves=len(sg.groups))
     if sg.kind == "new_branch":
-        return Ghost(branch=sg.branch, saves=1 if s.dirty else 0)
+        return Ghost(branch=sg.branch, saves=1 if s.dirty else 0, fork=sg.target or None)
     if sg.kind == "merge":
         return Ghost(merge=(sg.branch, sg.target))
     if sg.kind == "upload" and s.branch:
@@ -212,7 +212,7 @@ def from_ai(s: RepoState, g: Graph | None, base: Suggestion) -> tuple[Suggestion
     """
     actions = allowed(s, base)
     out, tel = ai.suggest_next(s, _facts(s, g, base, actions), with_changes=base.kind == "save")
-    sg = _checked(out, s, base, actions)
+    sg = _checked(out, s, base, actions, g)
     tel.update(action=out.action, used=sg is not base, step=sg.kind)
     return sg, tel
 
@@ -222,7 +222,23 @@ def _clean(text: str, limit: int) -> str:
     return (lines[0] if lines else "").strip().strip('"\'`').strip()[:limit]
 
 
-def _checked(out: ai.NextStep, s: RepoState, base: Suggestion, actions: list[str]) -> Suggestion:
+def branch_start(s: RepoState, g: Graph | None) -> str:
+    """Where a branch for the unsaved changes should start: the main branch, or "" for here.
+
+    On the main branch, here. On another branch, the AI only suggests a new one
+    when the changes are about something else, so it starts from the main
+    branch and doesn't carry this branch's saves along. Unless the changes edit
+    files this branch changed: then they can't move without them, so here.
+    """
+    if not g or not g.trunk or not s.branch or s.branch == g.trunk:
+        return ""
+    if not any(l.name == g.trunk and l.kind == "trunk" and l.tip for l in g.lanes):
+        return ""
+    return "" if git.unsaved_in_the_way(s, g.trunk) else g.trunk
+
+
+def _checked(out: ai.NextStep, s: RepoState, base: Suggestion, actions: list[str],
+             g: Graph | None = None) -> Suggestion:
     if out.action not in actions:
         return base
     reason = _clean(out.reason, 200) or base.reason
@@ -240,8 +256,10 @@ def _checked(out: ai.NextStep, s: RepoState, base: Suggestion, actions: list[str
     if out.action == "new_branch":
         name = git.tidy_branch_name(out.branch)
         if name and name not in git.branches(s.root) and git.valid_branch_name(s.root, name):
-            return Suggestion("new_branch", f"Start a branch for this: {name}", reason,
-                              source="ai", branch=name)
+            start = branch_start(s, g)
+            return Suggestion("new_branch", f"Start a branch for this: {name}"
+                              + (f" (from {start})" if start else ""), reason,
+                              source="ai", branch=name, target=start)
         return base
     if out.action == "combine" and base.kind == "merge":
         return Suggestion("merge", base.title, reason, source="ai", branch=base.branch, target=base.target)

@@ -589,10 +589,10 @@ class BranchMap(Vertical, can_focus=True):
                     and not (s.conflicts or s.merging or s.rebasing or s.reverting))
 
     def _new_anchor(self) -> int | None:
-        """The row the new-branch row hangs under (where you are), if there is one."""
-        if self.g is None or not ((self.ghost and self.ghost.branch) or self._plain_trunk()):
+        """The row the new-branch row hangs under, if there is one."""
+        if self.g is None:
             return None
-        r = next((r for r, lane in enumerate(self.g.lanes) if graph._here(lane, self.g)), None)
+        r = graph.new_row_anchor(self.g, self.ghost, self._plain_trunk())
         return r if r is not None and self.cells[r] else None
 
     def _draw(self, focused: bool | None = None) -> None:
@@ -777,12 +777,15 @@ class BranchMap(Vertical, can_focus=True):
             return
         await self.new_branch(self.selected()[1])
 
-    async def new_branch(self, sha: str, name: str | None = None) -> None:
-        """Start a branch at `sha`. Asks for the name unless one is given (an accepted suggestion)."""
+    async def new_branch(self, sha: str, name: str | None = None, label: str | None = None) -> None:
+        """Start a branch at `sha`. Asks for the name unless one is given (an accepted suggestion).
+
+        label: how the plan names `sha`, e.g. "main" (default: where you are, or the save's description).
+        """
         s, g = self.s, self.g
         here = sha == s.head_sha
         c = g.commit(sha)
-        label = "where you are" if here else f"the save “{c.subject if c else sha[:7]}”"
+        label = label or ("where you are" if here else f"the save “{c.subject if c else sha[:7]}”")
         name = name or await self.app.ask_branch_name(s, label)
         if not name:
             return
@@ -1412,7 +1415,12 @@ class Gitly(App):
         if sg.kind == "cleanup":
             return actions.delete_branch(sg.branch)
         if sg.kind == "new_branch" and s.head_sha:
-            await bm.new_branch(s.head_sha, name=sg.branch)
+            # Changes that don't belong on this branch start their own from the main branch.
+            start = next((l.tip for l in bm.g.lanes if sg.target and l.is_branch and l.name == sg.target), None)
+            if start:
+                await bm.new_branch(start, name=sg.branch, label=f"'{sg.target}'")
+            else:
+                await bm.new_branch(s.head_sha, name=sg.branch)
         elif sg.kind == "merge":
             await bm.combine_branches(sg.branch, sg.target)
         return None

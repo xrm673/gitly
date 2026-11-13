@@ -158,6 +158,28 @@ def test_ai_branch_name_is_tidied_and_must_be_new(repo):
     assert suggest._checked(pick(action="new_branch", branch="main"), s, base, actions_) is base
 
 
+def test_ai_branch_off_a_feature_branch_starts_from_main(repo):
+    sh(repo, "switch", "-qc", "dark-mode")
+    commit(repo, "theme")
+    (repo / "hikes.js").write_text("x")  # nothing to do with dark mode
+    s, g = look(repo)
+    base = suggest.rules(s, g)
+    sg = suggest._checked(pick(action="new_branch", branch="add-hikes"), s, base, suggest.allowed(s, base), g)
+    assert (sg.kind, sg.branch, sg.target) == ("new_branch", "add-hikes", "main") and "(from main)" in sg.title
+    assert suggest.ghost(sg, s) == graph.Ghost(branch="add-hikes", saves=1, fork="main")
+    # Edits to a file this branch changed can't move to main without it: start here instead.
+    (repo / "theme.txt").write_text("darker")
+    s, g = look(repo)
+    sg = suggest._checked(pick(action="new_branch", branch="add-hikes"), s, base, suggest.allowed(s, base), g)
+    assert sg.target == "" and "from" not in sg.title
+
+
+def test_ai_branch_on_main_starts_here(repo):
+    s, base, actions_ = dirty(repo)
+    sg = suggest._checked(pick(action="new_branch", branch="payments"), s, base, actions_, graph.build(s))
+    assert sg.target == ""
+
+
 def test_ai_can_say_a_branch_is_not_done(repo):
     sh(repo, "switch", "-qc", "login")
     commit(repo, "wip login")

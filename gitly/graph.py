@@ -89,7 +89,8 @@ class Graph:
 class Ghost:
     """What the suggested next step would add to the map. Nothing here exists yet."""
     saves: int = 0  # new saves where you are (or on `branch`)
-    branch: str | None = None  # a new branch starting where you are
+    branch: str | None = None  # a new branch starting where you are (or at `fork`'s latest save)
+    fork: str | None = None  # the branch `branch` grows out of, when it isn't where you are
     merge: tuple[str, str] | None = None  # (source, target): source combined into target
     tails: dict[str, str] = field(default_factory=dict)  # lane name -> short marker, e.g. "⇡ upload"
 
@@ -497,12 +498,24 @@ def row_label_width(g: Graph, ghost: Ghost | None = None, new_row: bool = False)
     return width
 
 
+def new_row_anchor(g: Graph, ghost: Ghost | None = None, new_row: bool = False) -> int | None:
+    """The lane the new-branch row hangs under: where you are, or the suggested branch's `fork`."""
+    if ghost and ghost.branch and ghost.fork:
+        r = next((r for r, l in enumerate(g.lanes) if l.is_branch and l.name == ghost.fork), None)
+        if r is not None:
+            return r
+    if (ghost and ghost.branch) or new_row:
+        return next((r for r, lane in enumerate(g.lanes) if _here(lane, g)), None)
+    return None
+
+
 def line_rows(g: Graph, ghost: Ghost | None = None, new_row: bool = False) -> list[int | None]:
     """What each line of render() shows: a lane index, or None for the new-branch row."""
+    anchor = new_row_anchor(g, ghost, new_row)
     out: list[int | None] = []
-    for r, lane in enumerate(g.lanes):
+    for r in range(len(g.lanes)):
         out.append(r)
-        if _here(lane, g) and ((ghost and ghost.branch) or new_row):
+        if r == anchor:
             out.append(None)
     return out
 
@@ -519,7 +532,8 @@ def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
     ghost: the suggested next step, drawn faintly (dashed lines, ◌ for saves
     that don't exist yet). max_width: shorten the notes after each row to fit.
     new_row: draw a faint "+ new branch" row under where you are (a suggested
-    branch takes its place). new_selected: the cursor is on that row.
+    branch takes its place, under its `fork` if it has one). new_selected: the
+    cursor is on that row.
     """
     if not g.lanes:
         return "[dim]No saves yet. Use “Save my work” to make your first one.[/]"
@@ -617,6 +631,7 @@ def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
             faint.update({(here_row, x), (here_row, x + 1)})
 
     width = row_label_width(g, ghost, new_row)
+    anchor = new_row_anchor(g, ghost, new_row)
     lines = []
     for r, lane in enumerate(g.lanes):
         name = lane.name if len(lane.name) <= width - 2 else lane.name[: width - 3] + "…"
@@ -658,8 +673,9 @@ def render(g: Graph, s: RepoState, selected: tuple[int, int] | None = None,
         note = _note(lane, g, s, unsaved, compact, room=room,
                      tail=ghost.tails.get(lane.name) if lane.is_branch else None)
         lines.append(line + " " + note if note else line.rstrip())
-        if here and (ghost.branch or new_row):
-            lines.append(_ghost_branch(ghost, width, col.get(g.head or "", ends.get(r, 0)),
+        if r == anchor:
+            at = (g.head if here else lane.tip) or ""
+            lines.append(_ghost_branch(ghost, width, col.get(at, ends.get(r, 0)),
                                        ncols, through.get(r, []), new_selected))
     if g.hidden_branches and not compact:
         lines.append(f"[dim]  … and {g.hidden_branches} more branch{'es' if g.hidden_branches != 1 else ''}[/]")
